@@ -862,6 +862,21 @@ across communication-SM splits and under CUDA Graph replay.
   the 512-expert layout at 2,048 and 32,768 tokens per rank (uniform) and at
   32,768 with the hot rank at 1.75x, on GB300.
 
+  Rows (BF16 routed weights, EP8; the forward and backward launches of the
+  shape take the row, the context recompute launch keeps the previous split):
+
+  | device | shape | layout | row | previous split | since |
+  | --- | --- | --- | --- | --- | --- |
+  | GB300 (152 SMs) | H 4096 / I 1024 / top 10 | `(8, 64)` | 56 / 48 | 20 / 24 | 0.4.1 |
+  | GB200 (152 SMs) | H 4096 / I 1024 / top 10 | `(8, 64)` | 56 / 48 | 40 / 40 | 0.4.5 |
+  | B300 (148 SMs) | H 4096 / I 1024 / top 10 | `(8, 64)` | 56 / 40 | 24 / 40 | 0.4.5 |
+  | B200 (148 SMs) | H 5120 / I 2304 / top 6, router weight before the down projection | `(8, 48)` | 20 / 40 | 40 / 40 | 0.4.5 |
+  | B300 (148 SMs) | H 5120 / I 2304 / top 6, router weight before the down projection | `(8, 48)` | 20 / 40 | 24 / 40 | 0.4.5 |
+
+  On B200 the imbalance split (24 / 28 from 4.0x) still replaces the `(8, 48)`
+  row under skew, and the source split (16) still applies below it. Rubin and
+  every other device, shape, precision and group size have no shape row.
+
   Row: GB300 (152 SMs) BF16 EP8, H 4096 / I 1024 / top 10 (the 512-expert
   layout `(8, 64)`): 56 / 48. The `COMM_SMS` row 20 / 24 was chosen at I 2048
   and top 8, where a routed row carries twice the expert GEMM work per byte it
@@ -870,11 +885,11 @@ across communication-SM splits and under CUDA Graph replay.
   domain, EP8, 32,768 tokens per rank, uniform / hot rank 1.75x, two rounds
   interleaved with 20 / 24, slowest rank's median: 20 / 24 46.24 / 72.74 ms,
   48 / 48 33.91 / 53.72, 56 / 40 34.23 / 54.31, 56 / 48 33.49 / 53.59, 64 / 48
-  33.81 / 53.54. B300 (148 SMs) keeps 24 / 40: 48 / 48 made the checkpointed
-  step faster (41.97 -> 38.90 ms, uniform, 32,768 tokens per rank) but the
-  backward slower (26.17 -> 27.14 ms; the faster forward leaves the GPU at a
-  lower SM clock under its power limit), and so did every forward count from 40
-  to 56 with a backward count of 40 or 48. B200 and GB200 keep 40 / 40.
+  33.81 / 53.54. In 0.4.1 B300 (148 SMs) kept 24 / 40: 48 / 48 made the
+  checkpointed step faster (41.97 -> 38.90 ms, uniform, 32,768 tokens per rank)
+  but the backward slower (26.17 -> 27.14 ms), and so did every forward count
+  from 40 to 56 with a backward count of 40 or 48; B200 and GB200 kept
+  40 / 40.
 
   Table: this package against 0.4.0 (main) on GB300, EP8 on two trays of one
   NVLink domain, the 512-expert layout (H 4096 / I 1024, top 10, direct router
@@ -889,7 +904,7 @@ across communication-SM splits and under CUDA Graph replay.
   checkpointed step = schedule, forward without context, context recompute and
   backward. The two 0.4.0 processes differ by at most 0.32 % on every row
   except the context recompute (at most 3.3 % of a 0.8 ms launch). On GB200,
-  B200 and B300 this package launches the same splits as 0.4.0.
+  B200 and B300 0.4.1 launched the same splits as 0.4.0.
 
   | routing | tokens per rank | operation | main (ms) | this package (ms) | change |
   | --- | --- | --- | --- | --- | --- |

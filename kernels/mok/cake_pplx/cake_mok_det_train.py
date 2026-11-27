@@ -262,9 +262,11 @@ def create_mok_bf16_workspace(
     workspace's ``hidden_size`` and ``topk``, the routed intermediate width)
     has a measured row of the device, routed precision and group size, which
     takes that row's count (:func:`resolve_shape_comm_sms`,
-    :data:`SHAPE_COMM_SMS`, ``MoKConfig.shape_comm_sms``; BF16 H 4096 / I 1024
-    / top-k 10 at EP8, the 512-expert layout (8, 64): GB300 56 / 48; a
-    context recompute launch keeps the row above). The returned
+    :data:`SHAPE_COMM_SMS`, ``MoKConfig.shape_comm_sms``; BF16 at EP8:
+    H 4096 / I 1024 / top-k 10, the 512-expert layout (8, 64): GB300 and
+    GB200 56 / 48, B300 56 / 40; H 5120 / I 2304 / top-k 6, the 384-expert
+    layout (8, 48): B200 and B300 20 / 40; a context recompute launch keeps
+    the row above). The returned
     ``fwd_num_comm_sms`` / ``bwd_num_comm_sms`` hold the row of ``precision``;
     on such a config a ``dataclasses.replace`` of ``fwd_num_comm_sms`` /
     ``bwd_num_comm_sms`` alone changes no launch: create the workspace with

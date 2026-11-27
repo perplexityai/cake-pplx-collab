@@ -2171,15 +2171,29 @@ def test_comm_split_follows_the_routed_precision():
     "capability,sm_count,precision,ep_size,expected",
     [
         ((10, 3), 152, "bf16", 8, {(4096, 1024, 10): (56, 48)}),  # GB300 EP8
-        ((10, 3), 148, "bf16", 8, None),  # B300 keeps its COMM_SMS row
+        (  # B300 EP8
+            (10, 3),
+            148,
+            "bf16",
+            8,
+            {(4096, 1024, 10): (56, 40), (5120, 2304, 6): (20, 40)},
+        ),
+        ((10, 0), 148, "bf16", 8, {(5120, 2304, 6): (20, 40)}),  # B200 EP8
+        ((10, 0), 152, "bf16", 8, {(4096, 1024, 10): (56, 48)}),  # GB200 EP8
         ((10, 3), 152, "mxfp8", 8, None),  # no MXFP8 shape row
         ((10, 3), 148, "mxfp8", 8, None),
+        ((10, 0), 148, "mxfp8", 8, None),
+        ((10, 0), 152, "mxfp8", 8, None),
         ((10, 3), 152, "bf16", 4, None),  # other group sizes keep COMM_SMS
         ((10, 3), 152, "bf16", 16, None),
         ((10, 3), 148, "bf16", 4, None),
+        ((10, 3), 148, "bf16", 16, None),
+        ((10, 0), 148, "bf16", 4, None),
+        ((10, 0), 148, "bf16", 16, None),
+        ((10, 0), 152, "bf16", 4, None),
+        ((10, 0), 152, "bf16", 16, None),
         ((10, 3), 160, "bf16", 8, None),  # other SM count
-        ((10, 0), 148, "bf16", 8, None),  # B200 keeps the factory split
-        ((10, 0), 152, "bf16", 8, None),  # GB200 keeps the factory split
+        ((10, 0), 132, "bf16", 8, None),
         ((10, 7), 212, "bf16", 8, None),
         ((10, 7), 212, "mxfp8", 8, None),
     ],
@@ -2211,7 +2225,14 @@ def test_shape_comm_sms_rows_are_the_measured_table(monkeypatch):
     from types import SimpleNamespace
 
     assert api.SHAPE_COMM_SMS == {
-        (10, 3): {152: {"bf16": {8: {(4096, 1024, 10): (56, 48)}}}},
+        (10, 0): {
+            148: {"bf16": {8: {(5120, 2304, 6): (20, 40)}}},
+            152: {"bf16": {8: {(4096, 1024, 10): (56, 48)}}},
+        },
+        (10, 3): {
+            148: {"bf16": {8: {(4096, 1024, 10): (56, 40), (5120, 2304, 6): (20, 40)}}},
+            152: {"bf16": {8: {(4096, 1024, 10): (56, 48)}}},
+        },
     }
     with pytest.raises(ValueError, match="precision must be one of"):
         api.resolve_shape_comm_sms("fp8", 8)
@@ -2233,10 +2254,18 @@ def test_shape_comm_sms_rows_are_the_measured_table(monkeypatch):
     "capability,sm_count,ep_size,expected",
     [
         ((10, 3), 152, 8, (("bf16", 4096, 1024, 10, 56, 48),)),  # GB300 EP8
-        ((10, 3), 148, 8, None),  # B300
+        (  # B300 EP8: rows sorted by shape
+            (10, 3),
+            148,
+            8,
+            (("bf16", 4096, 1024, 10, 56, 40), ("bf16", 5120, 2304, 6, 20, 40)),
+        ),
         ((10, 3), 152, 4, None),
-        ((10, 0), 148, 8, None),  # B200
-        ((10, 0), 152, 8, None),  # GB200
+        ((10, 3), 148, 4, None),
+        ((10, 0), 148, 8, (("bf16", 5120, 2304, 6, 20, 40),)),  # B200 EP8
+        ((10, 0), 152, 8, (("bf16", 4096, 1024, 10, 56, 48),)),  # GB200 EP8
+        ((10, 0), 148, 4, None),
+        ((10, 0), 152, 4, None),
         ((10, 7), 212, 8, None),
     ],
 )
@@ -2301,6 +2330,59 @@ def test_comm_split_follows_the_launch_shape():
     assert split(None, rows, SimpleNamespace(hidden_size=6144, topk=10), False, 1024) == (20, 24)
     fixed = MoKConfig(fwd_num_comm_sms=40, bwd_num_comm_sms=40)
     assert split(None, fixed, ws, False, 1024) == (40, 40)
+
+
+def test_comm_split_takes_each_shape_row_and_the_imbalance_split(monkeypatch):
+    """Host-only: with the two shape rows of B300 at EP8 (the 512-expert and
+    the 384-expert layouts), each forward or backward launch takes the row of
+    its own shape, and the context recompute launch (no width given), an MXFP8
+    launch and another width keep the routed-precision row. With an imbalance
+    split (B200 BF16 24 / 28 from 4.0x), a skewed observation replaces the
+    shape row; no observation and a balanced one keep it."""
+    from types import SimpleNamespace
+
+    split = backend.MoKFunctional._comm_split
+    b300 = MoKConfig(
+        fwd_num_comm_sms=24,
+        bwd_num_comm_sms=40,
+        bf16_comm_sms=(24, 40),
+        mxfp8_comm_sms=(40, 40),
+        shape_comm_sms=(
+            ("bf16", 4096, 1024, 10, 56, 40),
+            ("bf16", 5120, 2304, 6, 20, 40),
+        ),
+    )
+    p512 = SimpleNamespace(hidden_size=4096, topk=10)
+    p384 = SimpleNamespace(hidden_size=5120, topk=6)
+    assert split(None, b300, p512, False, 1024) == (56, 40)
+    assert split(None, b300, p384, False, 2304) == (20, 40)
+    assert split(None, b300, p512, False) == (24, 40)
+    assert split(None, b300, p384, False) == (24, 40)
+    assert split(None, b300, p384, True, 2304) == (40, 40)
+    assert split(None, b300, p384, False, 1024) == (24, 40)
+    assert split(None, b300, p512, False, 2304) == (24, 40)
+    b200 = MoKConfig(
+        fwd_num_comm_sms=40,
+        bwd_num_comm_sms=40,
+        bf16_comm_sms=(40, 40),
+        mxfp8_comm_sms=(40, 40),
+        shape_comm_sms=(("bf16", 5120, 2304, 6, 20, 40),),
+        imbalance_comm_sms=(24, 28),
+        imbalance_threshold=4.0,
+    )
+    entry = {"loads": (), "split": None}
+    functional = SimpleNamespace(
+        _load_entry=lambda workspace, create: entry,
+        _collect_load=lambda observed: None,
+    )
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    assert split(functional, b200, p384, False, 2304) == (20, 40)
+    entry["loads"] = [100] * 8
+    assert split(functional, b200, p384, False, 2304) == (20, 40)
+    assert split(functional, b200, p384, False) == (40, 40)
+    entry["loads"] = [560, 100, 100, 40, 0, 0, 0, 0]  # 5.6x the mean
+    assert split(functional, b200, p384, False, 2304) == (24, 28)
+    assert split(functional, b200, p384, False) == (24, 28)
 
 
 def test_routed_precision_splits_are_validated():
