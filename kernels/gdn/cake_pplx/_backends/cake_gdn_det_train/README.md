@@ -260,10 +260,14 @@ are:
 - the two-stream split adjoint at `G = 2`: the largest L2 error of `dg` is
   1.015 to 1.016 times the tier's (0.2.8: 1.016 to 1.019 times).
 
-Both hold with or without an initial state.  The tests reach these
-routes with plan pins or a patched planner on small layouts.  A call that the
-fix does not reach keeps the 0.2.8 programs, bits and accuracy, including the
-misses of 0.2.8.
+Both hold with or without an initial state.  On the small layout of 300, 77
+and 640 tokens at `G = 3` under a `finalize` pin (the `dqkwg` tail and the WY
+pullback) with an FP32 `beta`, an initial state and a final-state gradient,
+the max-norm error of the forward output `o` meets the tier on 14 of 32
+draws; 0.2.10 gives the same bits.  The tests reach these routes with plan
+pins or a patched planner on small layouts.  A call that the fix does not
+reach keeps the 0.2.8 programs, bits and accuracy, including the misses of
+0.2.8.
 
 In 0.2.8 the segment maps of a split pass 2 at `G = 3` on `dhu_tc2_dvl32` come
 from `dhu_tc2_dvl32_gm` or `dhu_tc2_dvl32_gm2` (above), where 0.2.3 to 0.2.7
@@ -329,6 +333,11 @@ In 0.2.5 `wy_a` and `fwd_ho_a` are built from newer kernel source under the
 same program names: in `wy_a` each compute warp owns the ring slots of its
 parity, and `fwd_ho_a` loads the row scales of `beta v` and `beta 2^g kn` in
 batches.  Routes, launch records and output bits are those of 0.2.4.
+
+In 0.2.11 `wy_a`, `fwd_ho`, `fwd_ho_vh2` (on every architecture) and
+`fwd_fused` are built from newer kernel source under the same program names:
+they add memory-ordering fences (`fence.proxy.async.shared::cta`).  Routes,
+launch records and output bits are those of 0.2.10.
 
 The route is chosen from shapes, dtypes, the architecture, the SM count and the
 pins, never from an address or a value: a Q, K or V that a kernel cannot read
@@ -498,8 +507,8 @@ per-stream ones.
 - Head dimension 128 and chunk 64 only; `q`, `k`, `v` BF16.
 - No context parallelism and no cross-rank state passing.
 - `sm_100a`, `sm_103a` and `sm_107a` only (`sm_107a` with CUDA 13.5 or newer).
-- Some calls with a final-state gradient miss the BF16 naive tier on `dg`;
-  Chain lists them.
+- Some calls with a final-state gradient miss the BF16 naive tier on `dg`,
+  and one small layout on the max-norm error of `o`; Chain lists them.
 
 ## Names
 
