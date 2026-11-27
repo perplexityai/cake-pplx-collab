@@ -22,7 +22,7 @@ Arms (the Cake arms run the autograd entries; the multi entry when a row has sev
 per tensor):
 
 * ``det_coop``: ``cooperative=True`` (one cooperative backward launch, fixed-order ``dweight`` reduction);
-* ``det_split``: ``cooperative=False`` (an ordinary backward launch one SM short of the co-resident CTA count, then
+* ``det_split``: ``cooperative=False`` (an ordinary backward launch a few SMs short of the co-resident CTA count, then
   the fixed-order reduce kernel);
 * ``det_split_aa``: ``det_split`` again on its own leaves, the A/A pair: the per-round ``det_split_aa / det_split``
   range is the row's noise band;

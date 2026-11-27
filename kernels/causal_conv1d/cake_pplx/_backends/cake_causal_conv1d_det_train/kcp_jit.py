@@ -41,8 +41,9 @@ without a rule is the fallback; ``dx``, the deterministic FP32 ``dweight`` and
 the predecessor fragments' tail derivatives ``dpre_tail`` in one cooperative
 launch), ``kcp_bwd_split`` (the same two programs built with ``split=True``,
 on sm_107a the big-channel one with its stage's tokens in two rolled passes,
-selected by the same rule: each is an ordinary launch one SM short of
-co-resident -- ``grid_rule.reserve_sms`` -- writing per-CTA ``dweight`` partial
+selected by the same rule: each is an ordinary launch a few SMs short of
+co-resident -- ``grid_rule.reserve_sms``, or the host's per-architecture
+``kcp.SPLIT_RESERVE_SMS`` (sm_103a) -- writing per-CTA ``dweight`` partial
 rows, followed on the same stream by the record's ``reduce`` program, the
 zero-history package's fixed-order reduction; a launch that no grid-wide
 barrier holds back starts beside kernels of other streams), ``kcp_bwd_head`` (one program: the head-row derivatives
@@ -501,7 +502,8 @@ MODULES: dict[str, dict[str, Any]] = {
         # grid-wide barrier that ends at its partial row; the record's
         # ``reduce`` program sums the partial rows in the fixed order.  3 CTAs
         # per SM (168 registers at 128 threads, the launch bound); the grid is
-        # the co-resident CTA count less the ``reserve_sms`` SMs
+        # the co-resident CTA count less the ``reserve_sms`` SMs, or less
+        # ``kcp.SPLIT_RESERVE_SMS`` of the architecture where the host sets one
         # (:func:`.kcp._launch_grid`).  The fallback program of the route (no
         # ``select_rule``).  Besides ``dx``
         # and ``dw`` it writes the predecessors' tail derivatives
@@ -680,7 +682,8 @@ MODULES: dict[str, dict[str, Any]] = {
         # zero-history backward's thresholds, which these programs' geometry
         # measured.  The ``split`` build: an ordinary launch followed by the
         # record's ``reduce`` program; the grid is the co-resident CTA count
-        # less the ``reserve_sms`` SMs.
+        # less the ``reserve_sms`` SMs (on sm_103a less
+        # ``kcp.SPLIT_RESERVE_SMS``, :func:`.kcp._launch_grid`).
         "grid_rule": {
             "cooperative": False,
             "ctas_per_sm": 2,

@@ -1038,9 +1038,9 @@ def test_recompute_handle_both_host_paths(monkeypatch, host_trim) -> None:
 
 # ----------------------------------------------------------------------------------------------------------------
 # The backward's launch forms: ``cooperative=True`` runs the cooperative ``kcp_bwd`` record,
-# ``cooperative=False`` the ``kcp_bwd_split`` record (an ordinary launch one SM short of co-resident) and its fixed-order
-# reduce program.  ``dx`` is bitwise the same in both forms; ``dweight`` is reproducible in each form and judged
-# against the naive tier, its bits differ between the forms (each sums its own partial rows).
+# ``cooperative=False`` the ``kcp_bwd_split`` record (an ordinary launch a few SMs short of co-resident) and its
+# fixed-order reduce program.  ``dx`` is bitwise the same in both forms; ``dweight`` is reproducible in each form and
+# judged against the naive tier, its bits differ between the forms (each sums its own partial rows).
 
 
 class _RouteRecorder:

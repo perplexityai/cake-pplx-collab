@@ -82,8 +82,10 @@ Two launch forms of the main backward program, one per
 call through the ``cooperative`` argument of the backward and autograd entries
 (``None`` = :data:`COOPERATIVE_DEFAULT`, ``False``: the ordinary launch).
 ``cooperative=False`` runs the ``kcp_bwd_split`` record: the token loop as an
-ordinary launch ``ctas_per_sm x (SM count - reserve_sms)`` CTAs wide
-(:func:`_launch_grid`), writing per-CTA partial rows, then the record's ``reduce``
+ordinary launch ``ctas_per_sm x (SM count - reserve)`` CTAs wide
+(:func:`_launch_grid`; ``reserve`` is :data:`SPLIT_RESERVE_SMS` of the
+architecture, 10 on sm_103a, else the record's ``grid_rule.reserve_sms``, 1),
+writing per-CTA partial rows, then the record's ``reduce``
 program (the zero-history package's fixed-order reduction, programmatically
 dependent on the main program) on the same stream.  It starts beside one
 small-carveout kernel of another stream per reserved SM; more such kernels
@@ -110,7 +112,11 @@ instructions and folds the received rows with the main program's FMAs in its ord
 partial rows and their reduction are the same.  The exchange, its wait and the collectives are unchanged; the call
 launches one more program when the rank receives tail rows.  On sm_103a and sm_107a the multi entry overlaps its
 first tensor this way and launches the other tensors' programs after the wait, so it too adds one program, not one
-per tensor; on sm_100a it waits first (``MULTI_BWD_OVERLAP_ARCHS``).
+per tensor; on sm_100a it waits first (``MULTI_BWD_OVERLAP_ARCHS``).  Inside a CUDA Graph capture on sm_100a
+(``CAPTURE_WAIT_ARCHS``, the reason at that constant) a single call with ``C x S`` of at least ``CAPTURE_WAIT_ELEMS``
+takes the waiting form too: the replayed graph waits for the exchange before the split program and runs no tail-row
+program; the grid is the same, and ``dx`` and ``dweight`` are bitwise the overlapped form's.  A smaller call
+overlaps in a capture as well.
 ``cooperative=True`` waits before its launch as before
 (a cooperative grid waits for the communication kernel anyway).  The private test knob ``bwd_overlap`` (``1``
 shipped, ``0`` = wait before the main program) selects the previous order for the A/B record.
@@ -146,10 +152,9 @@ of ``x`` (:func:`_send_slice`; the same rows in the same order, no gather copy).
 Graph capture the exchange is issued with ``async_op=False`` (:func:`_fwd_sync`): the caller's stream is ordered
 after it when the call returns (recent torch runs the collective on that stream itself), so there is no work handle
 to wait and no event between the streams before the forward's first program; the overlapped form and a capture keep
-the asynchronous exchange and its wait.  A CUDA Graph capture of a large call on sm_100a and sm_103a gathers its
-send rows instead of sending the slice (:func:`_capture_gather`; ``CAPTURE_GATHER_ARCHS``, ``CAPTURE_GATHER_ELEMS``
-and the reason at those constants).  The previous host path and the multi entry keep the gather and the
-asynchronous exchange.  The received rows and the programs are the same, so ``y`` and ``hist`` keep their bits.
+the asynchronous exchange and its wait.  A CUDA Graph capture sends the slice too, on every architecture.  The
+previous host path and the multi entry keep the gather and the asynchronous exchange.  The received rows and the
+programs are the same, so ``y`` and ``hist`` keep their bits.
 
 The ``kcp_fwd`` program launches ``ctas_per_sm x (SM count - FWD_RESERVE_SMS)``
 CTAs when they hold every channel tile of ``C``, else the full co-resident grid
@@ -236,6 +241,19 @@ COOPERATIVE_DEFAULT = False
 # zero-history registry's record and launches its full co-resident grid, as the single-rank forward does; the
 # history-row program launches the head program's grid.
 FWD_RESERVE_SMS = 1
+# SMs of co-resident CTAs the ``kcp_bwd_split`` programs leave free, by architecture, where this host differs from the
+# record's ``grid_rule.reserve_sms`` (1; the shared records keep it): :func:`_launch_grid`, on every call (eager and in
+# a CUDA Graph capture, at one rank and at more), so a replayed graph's ``dweight`` is the eager call's.  The backward
+# exchange's communication kernel occupies CP + 1 SMs (3 / 5 / 9 at CP2 / CP4 / CP8 on B200, 3 / 5 on GB300).  With one
+# reserved SM, the split CTAs it displaces run in a second wave on a rank whose exchange is still resident, and the
+# overlapped backward replayed from a graph has two speeds.  On sm_103a (GB300, CP2 and CP4; one C = 8192 tensor of
+# 16384 rows and one C = 10240 tensor of 32768 rows per rank) 10 reserved SMs give the replayed backward one speed and
+# 17.8-25.2 % less time (177-364 us vs 219-481 us), the replayed checkpointed step 1.6-2.7 % less, and eager calls
+# within 0.8 %.  5 reserved SMs were as fast but kept two speeds on some rows.  sm_100a waits in a capture of a large
+# call instead (``CAPTURE_WAIT_ARCHS``, ``CAPTURE_WAIT_ELEMS``; there a shorter grid made eager backward calls up to
+# 5.1 % slower), and sm_107a's replayed backward has one speed with one reserved SM.  The ``dweight`` bits on sm_103a
+# differ from a one-SM reservation's (another set of partial rows); they are reproducible as before.
+SPLIT_RESERVE_SMS: dict[str, int] = {"sm_103a": 10}
 GRAPH_MODES = (
     "off",
     "replay",
@@ -249,27 +267,36 @@ def _launch_grid(
     record: dict[str, Any],
     *,
     device_index: int,
+    arch: str | None = None,
     C: int | None = None,
     S: int | None = None,
 ) -> tuple[int, int, int]:
-    """The record's launch grid (:func:`cake_jit.launch_grid`) less its reserved SMs of co-resident CTAs: the record's
-    ``grid_rule.reserve_sms``, else :data:`FWD_RESERVE_SMS` for the forward record, else none.
+    """The record's launch grid (:func:`cake_jit.launch_grid`) less its reserved SMs of co-resident CTAs: for a
+    ``kcp_bwd_split`` record :data:`SPLIT_RESERVE_SMS` of ``arch`` (the device's architecture, required for that role),
+    else the record's ``grid_rule.reserve_sms``; :data:`FWD_RESERVE_SMS` for the forward record; else none.
 
-    A record with ``reserve_sms = 1`` launches ``ctas_per_sm x (SM count - 1)`` CTAs: one small-carveout kernel of
+    A grid ``reserve`` SMs short launches ``ctas_per_sm x (SM count - reserve)`` CTAs: one small-carveout kernel of
     another stream resident on an SM keeps the whole SM from hosting a CTA of this program (its shared memory needs the
-    SM's large carveout), so a grid one SM short of the co-resident count still starts every CTA at once beside it.
+    SM's large carveout), so every CTA still starts at once beside up to ``reserve`` such kernels.
     The grid is a pure function of the device and the record, so the partial rows and the
-    fixed-order ``dweight`` sum are the same on every call on one device type (bits differ from a full-grid launch).
+    fixed-order ``dweight`` sum are the same on every call on one device type (bits differ from another grid's).
     More such kernels than reserved SMs make the displaced CTAs start after the first ones finish: the backward then
     takes at most about twice its time, independent of how long the other kernels run.
     """
 
     grid = _record_launch_grid(record, device_index=device_index, C=C, S=S)
+    role = record.get("role")
     reserve = int(
         record["grid_rule"].get(
-            "reserve_sms", FWD_RESERVE_SMS if record.get("role") == KCP_FWD else 0
+            "reserve_sms", FWD_RESERVE_SMS if role == KCP_FWD else 0
         )
     )
+    if role == KCP_BWD_SPLIT:
+        if arch is None:
+            raise ValueError(
+                f"{record['kernel_symbol']}: the split backward's grid needs the device's architecture"
+            )
+        reserve = SPLIT_RESERVE_SMS.get(arch, reserve)
     if reserve:
         reserved = reserve * int(record["grid_rule"]["ctas_per_sm"])
         if grid[0] <= reserved:
@@ -318,11 +345,19 @@ def _bwd_kind(cooperative: bool) -> str:
     return KCP_BWD if cooperative else KCP_BWD_SPLIT
 
 
-def _overlapped(cooperative: bool, work: Optional[Any]) -> bool:
+def _overlapped(cooperative: bool, work: Optional[Any], arch: str, elems: int) -> bool:
     """Whether a backward call with tokens runs the overlapped backward (the module docstring): the ``kcp_bwd_split``
-    form with an exchange in flight (``work``, more than one rank) and the shipped ``bwd_overlap`` knob."""
+    form with an exchange in flight (``work``, more than one rank) and the shipped ``bwd_overlap`` knob, but not
+    inside a CUDA Graph capture on the architectures of :data:`CAPTURE_WAIT_ARCHS` (``arch``, the device's) of a call
+    whose ``C x S`` (``elems``) is at least :data:`CAPTURE_WAIT_ELEMS`."""
 
-    return not cooperative and work is not None and _TEST_KNOBS["bwd_overlap"] == 1
+    if cooperative or work is None or _TEST_KNOBS["bwd_overlap"] != 1:
+        return False
+    return not (
+        arch in CAPTURE_WAIT_ARCHS
+        and elems >= CAPTURE_WAIT_ELEMS
+        and torch.cuda.is_current_stream_capturing()
+    )
 
 
 def _bwd_variant(cooperative: bool) -> Any:
@@ -695,8 +730,25 @@ BWD_OVERLAP_DEFAULT = 1
 # The architectures whose multi entry takes the overlapped backward (its first tensor's main programs before the
 # exchange's wait).  On sm_100a the overlapped multi backward measured no robust gain over the waiting one (B200,
 # 3 x C = 8192 at CP4 and CP8: -0.9% to +0.8% per shape; CP4 zigzag 0.5% slower with only the knob changed), so its
-# multi entry waits first.  The single call overlaps on every architecture.
+# multi entry waits first.  The single call overlaps on every architecture, except in a capture of a call of at least
+# CAPTURE_WAIT_ELEMS on CAPTURE_WAIT_ARCHS.
 MULTI_BWD_OVERLAP_ARCHS = frozenset(("sm_103a", "sm_107a"))
+# The architectures whose single call takes the waiting backward inside a CUDA Graph capture when its C x S is at
+# least CAPTURE_WAIT_ELEMS (:func:`_overlapped`; eager calls and smaller calls overlap).  On sm_100a (B200, CP2 / CP4 /
+# CP8; one C = 8192 tensor of 16384 rows and one C = 10240 tensor of 32768 rows per rank) the replayed overlapped
+# backward has two speeds (248-604 us), and the replayed waiting one has one speed and 17.9-35.2 % less time
+# (201-394 us).  Its replayed checkpointed step is 1.1 % faster to 4.7 % slower than the overlapped form's fast state
+# and faster than its slow state (CP2, C = 10240: 871.8 us vs 853.4 / 1004.9 us).  Smaller calls lose with the waiting
+# form, whose wait puts the exchange back on the backward's path: one C = 512 tensor of 4096 rows, one C = 1024 tensor
+# of 16384 rows and one C = 4096 tensor of 16384 rows per rank (CP2 / CP4 / CP8) replayed 0.6-14.6 % slower backward
+# and 2.6-10.5 % slower checkpointed steps (4096 x 16384: 3.8-17.4 us more backward).  So the capture waits from
+# C x S = 8192 x 16384, the smallest measured call where it won, and smaller calls keep the overlapped form, as in a
+# capture of 0.2.21 below its gather threshold (the same send slice and programs).  The grid and the bits do not
+# change.  On sm_103a the waiting form left the replayed checkpointed step up to 3.1 % slower, so sm_103a reserves SMs
+# instead (SPLIT_RESERVE_SMS).  On sm_107a the replayed overlapped backward has one speed (C = 10240, 32768 rows per
+# rank, CP2 and CP4: 234-242 us; eager 234-240 us), so it overlaps in a capture too.
+CAPTURE_WAIT_ARCHS = frozenset(("sm_100a",))
+CAPTURE_WAIT_ELEMS = 8192 * 16384
 # The two-launch forward (the module docstring's "Two-launch forward"): the knob values of ``fwd_main`` (the main
 # program: 1 = the single-rank ``fwd`` route program, 0 = the ``kcp_fwd`` program) and ``fwd_overlap`` (1 = the main
 # program before the exchange's wait, 0 = after it); ``None``, shipped, = the architecture sets below.
@@ -722,19 +774,6 @@ FWD_MAIN_ARCHS = frozenset(("sm_100a", "sm_103a", "sm_107a"))
 FWD_OVERLAP_ARCHS: frozenset[str] = frozenset()
 MULTI_FWD_MAIN_ARCHS = frozenset(("sm_100a", "sm_103a", "sm_107a"))
 MULTI_FWD_OVERLAP_ARCHS = frozenset(("sm_107a",))
-# The single call's send rows inside a CUDA Graph capture (:func:`_capture_gather`).  On sm_103a the overlapped backward
-# replayed from a graph has two speeds at large shapes, with the gather and with the slice alike (one C = 10240 tensor
-# of 32768 rows per rank, CP2 and CP4: about 365 us or 477 us; the slow one when the backward exchange's communication
-# kernel is still resident as the split program launches).  The slice shortens each replayed forward by about 8 us,
-# which moves the checkpointed step's backward into the slow state: checkpointed step 796-824 us with the gather,
-# mostly 896-904 us with the slice (813-837 us either way with the waiting backward).  So a capture of a call with C x S
-# of at least CAPTURE_GATHER_ELEMS gathers on sm_103a, and on sm_100a, which runs the same overlapped backward (the
-# slice's effect is not measured on sm_100a; there the replayed checkpointed step of that tensor has two speeds with the
-# gather too, 2 ranks: about 850 us or about 990 us).  On sm_107a the replayed backward has one speed (234-242 us; eager
-# 234-240 us) and the slice is faster there (checkpointed step 1.4-2.4%), so it keeps the slice.  Eager calls and
-# smaller shapes send the slice on every architecture.
-CAPTURE_GATHER_ARCHS = frozenset(("sm_100a", "sm_103a"))
-CAPTURE_GATHER_ELEMS = 8192 * 16384
 _TEST_KNOBS: dict[str, Any] = {
     "graph": "off",
     "host_trim": HOST_TRIM_DEFAULT,
@@ -1281,9 +1320,8 @@ def _fwd_host(
     """The trimmed forward's operand checks, output and host-cache entry: ``(S, C, x_flat, w, y, entry)``.  The entry
     is cached per ``(ctx, S, C, device, cu_seqlens_local_cpu, sr, overlap)`` (:func:`_fwd_form` of the device's
     architecture, of the multi entry's sets with ``multi``; both kept in the entry): the validated ``cu`` /
-    ``hist_index`` / ``hist_row_off`` tables, the halo splits, the send slice (:func:`_send_slice`) and its capture rule
-    (:func:`_capture_gather_rule`), the main program's record, its plan scalars, grid and counter words, the loaded
-    module with its argument plan."""
+    ``hist_index`` / ``hist_row_off`` tables, the halo splits, the send slice (:func:`_send_slice`), the main program's
+    record, its plan scalars, grid and counter words, the loaded module with its argument plan."""
 
     S, C, x_flat = _tokens(x, "x_local", device=device)
     w = _weight(weight, C, device=device)
@@ -1313,7 +1351,6 @@ def _fwd_host(
             n_frag=n_frag,
             hist_index=hist_index,
             send_slice=_send_slice(ctx, hist_index, S),
-            capture_gather=_capture_gather_rule(arch, C, S),
             recv_rows=int(halo.n_hist_rows),
             send_splits=tuple(halo.fwd_send_rows),
             recv_splits=tuple(halo.fwd_recv_rows),
@@ -1397,27 +1434,13 @@ def _fwd_sync(e: dict[str, Any]) -> bool:
     return not e["overlap"] and not torch.cuda.is_current_stream_capturing()
 
 
-def _capture_gather_rule(arch: str, C: int, S: int) -> bool:
-    """Whether a CUDA Graph capture of the single call gathers its send rows although they are a slice: on the
-    architectures of ``CAPTURE_GATHER_ARCHS`` when ``C x S`` is at least ``CAPTURE_GATHER_ELEMS`` (the reason at those
-    constants).  Kept in the host-cache entry as ``capture_gather``."""
-    return arch in CAPTURE_GATHER_ARCHS and C * S >= CAPTURE_GATHER_ELEMS
-
-
-def _capture_gather(e: dict[str, Any]) -> bool:
-    """Whether this forward gathers its send rows instead of sending the slice: inside a CUDA Graph capture, when the
-    entry's ``capture_gather`` (:func:`_capture_gather_rule`) holds."""
-    return bool(e.get("capture_gather")) and torch.cuda.is_current_stream_capturing()
-
-
 def _fwd_gather(
     x_flat: torch.Tensor, C: int, e: dict[str, Any], *, view: bool = False
 ) -> torch.Tensor:
     """The forward's send rows: the context's ``hist_index`` rows of ``x_flat`` in destination-rank order.  With
     ``view`` (the single call's trimmed path) and a send slice in the entry (:func:`_send_slice`), the slice of
-    ``x_flat`` that holds those rows in that order (no copy), but not in a capture of :func:`_capture_gather`; else
-    their gather."""
-    if view and e.get("send_slice") is not None and not _capture_gather(e):
+    ``x_flat`` that holds those rows in that order (no copy, also in a CUDA Graph capture); else their gather."""
+    if view and e.get("send_slice") is not None:
         start, stop = e["send_slice"]
         return x_flat[start:stop]
     hist_index = e["hist_index"]
@@ -1553,9 +1576,8 @@ def _kcp_forward_trim(
     """Trimmed host path: :func:`_kcp_forward` with the context-derived host work cached per ``(ctx, S, C, device,
     cu_seqlens_local_cpu, sr, overlap)`` (:func:`_fwd_host`).  The operand checks, the gather, the exchange, the wait
     and the launches are the untrimmed call's, in the same order on the same stream, but for the forward exchange:
-    its send rows are a slice of ``x`` where they are one (:func:`_send_slice`), except in a capture of
-    :func:`_capture_gather`, which gathers them, and in the waiting form outside a capture it is issued with
-    ``async_op=False`` (:func:`_fwd_sync`), with no work to wait."""
+    its send rows are a slice of ``x`` where they are one (:func:`_send_slice`), and in the waiting form outside a
+    capture it is issued with ``async_op=False`` (:func:`_fwd_sync`), with no work to wait."""
 
     S, C, x_flat, w, y, e = _fwd_host(x, weight, ctx, out=out, device=device)
     if _hist is None:
@@ -1763,7 +1785,7 @@ def _kcp_backward(
     names = selected_modules(arch, _bwd_kind(cooperative), C=C, S=S)
     record = _loader.MODULES[names[0]]
     scalars = plan(S, C, n_frag, geometry=record["grid_rule"]["geometry"], legacy=True)
-    grid_x = _launch_grid(record, device_index=device_index)[0]
+    grid_x = _launch_grid(record, device_index=device_index, arch=arch)[0]
     if scalars["n_ch_tiles"] > grid_x:
         raise ValueError(
             f"C={C} spans more channel tiles than the backward's grid on this device holds"
@@ -1786,7 +1808,7 @@ def _kcp_backward(
         "tail_row_off": tail_row_off,
         **_scalars(scalars),
     }
-    overlap = _overlapped(cooperative, work)
+    overlap = _overlapped(cooperative, work, arch, C * S)
     if overlap:
         # the overlapped backward: the main programs read no received row while the exchange is in flight
         values["tail_row_off"] = torch.full(
@@ -1795,12 +1817,14 @@ def _kcp_backward(
     elif work is not None:
         work.wait()
     for name in names:
-        # the grid of :func:`_launch_grid` (less the record's reserved SMs): the one the partial rows are sized for
+        # the grid of :func:`_launch_grid` (less the reserved SMs): the one the partial rows are sized for
         run_module(
             name,
             values,
             device_index=device_index,
-            grid=_launch_grid(_loader.MODULES[name], device_index=device_index),
+            grid=_launch_grid(
+                _loader.MODULES[name], device_index=device_index, arch=arch
+            ),
         )
     reduce = _reduce_plan(record, C, grid_x, device_index)
     if reduce is not None:
@@ -1866,6 +1890,7 @@ def _bwd_host(
         device_index = _device_index(device)
         n_head = int(halo.n_head_rows)
         e.update(
+            arch=arch,
             cu=cu,
             n_frag=n_frag,
             device_index=device_index,
@@ -1919,7 +1944,7 @@ def _bwd_host(
             scalars = plan(
                 S, C, n_frag, geometry=record["grid_rule"]["geometry"], legacy=True
             )
-            grid_x = _launch_grid(record, device_index=device_index)[0]
+            grid_x = _launch_grid(record, device_index=device_index, arch=arch)[0]
             if scalars["n_ch_tiles"] > grid_x:
                 raise ValueError(
                     f"C={C} spans more channel tiles than the backward's grid on this device holds"
@@ -1930,7 +1955,9 @@ def _bwd_host(
             e["launches"] = tuple(
                 _launch_plan(
                     name,
-                    _launch_grid(_loader.MODULES[name], device_index=device_index),
+                    _launch_grid(
+                        _loader.MODULES[name], device_index=device_index, arch=arch
+                    ),
                     device_index,
                 )
                 for name in names
@@ -2150,7 +2177,7 @@ def _kcp_backward_trim(
             work.wait()
         dw_out.zero_()
         return dx_out, dw_out
-    overlap = _overlapped(cooperative, work)
+    overlap = _overlapped(cooperative, work, e["arch"], C * S)
     _bwd_main(
         e,
         x_flat,
@@ -2277,8 +2304,9 @@ def cake_causal_conv1d_det_kcp(
         backward that needs it is pending.
     cooperative : bool, optional
         The launch form of the backward's main program (the forward is the same either way).  ``None`` (default):
-        :data:`COOPERATIVE_DEFAULT`, ``False``.  ``False``: an ordinary launch one SM short of co-resident plus a
-        fixed-order reduce program on the same stream; it starts beside a small kernel of another stream.
+        :data:`COOPERATIVE_DEFAULT`, ``False``.  ``False``: an ordinary launch a few SMs short of co-resident
+        (:data:`SPLIT_RESERVE_SMS`: 10 on sm_103a, else 1) plus a fixed-order reduce program on the same stream; it
+        starts beside small kernels of other streams on the reserved SMs.
         ``True``: one cooperative launch; it starts only when every CTA fits at once, so it waits for any kernel of
         another stream that occupies an SM.  ``dx`` is bitwise the same in both forms.  ``dweight`` is reproducible
         and summed in plain FP32 words in each form, but its bits differ between the forms (each form sums
@@ -2612,8 +2640,8 @@ def _kcp_backward_multi(
             dw.zero_()
         return dx_out, dw_out
     overlap = (
-        _overlapped(cooperative, work)
-        and _device_arch(device) in MULTI_BWD_OVERLAP_ARCHS
+        _overlapped(cooperative, work, e0["arch"], calls[0][1] * calls[0][0])
+        and e0["arch"] in MULTI_BWD_OVERLAP_ARCHS
     )
     if overlap:
         # the first tensor's main programs while the exchange is in flight (its head pool: a valid, unread

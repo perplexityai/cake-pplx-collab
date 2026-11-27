@@ -17,8 +17,9 @@ The KCP registry (``kcp_jit``) of the Cake causal convolution training package: 
 kernel ABIs and the eleven shipped program names, the routes and the selection by channel count, and the
 ``build.json`` entries of the KCP programs.  Each backward program ships twice: the cooperative build (route ``kcp_bwd``) and its ``split``
 build (route ``kcp_bwd_split``, built with ``pair=True``: the token arithmetic on packed
-``f32x2`` channel pairs), an ordinary launch one SM short of co-resident (``reserve_sms``) whose ``dweight`` partial
-rows the zero-history package's fixed-order reduce program sums.  The tail-row program (route ``kcp_bwd_halo``) of the
+``f32x2`` channel pairs), an ordinary launch a few SMs short of co-resident (the record's ``reserve_sms``, or the
+host's ``kcp.SPLIT_RESERVE_SMS`` of the architecture) whose ``dweight`` partial rows the zero-history package's
+fixed-order reduce program sums.  The tail-row program (route ``kcp_bwd_halo``) of the
 overlapped backward and the history-row program (route ``kcp_fwd_halo``) of the two-launch forward are routes of their
 own, outside ``KINDS``; the two-launch forward's single-rank main program is the zero-history registry's ``fwd`` route.
 No device is needed; nothing is built or launched.
@@ -322,7 +323,8 @@ def test_build_manifest_lists_the_kcp_programs() -> None:
 def test_backward_launch_form_selects_the_route(monkeypatch) -> None:
     """The host's ``cooperative`` argument: ``None`` is the package default, a bool picks the
     ``kcp_bwd`` (cooperative) or ``kcp_bwd_split`` route, anything else is refused; the split records launch
-    ``ctas_per_sm x (SMs - reserve_sms)`` CTAs (:func:`kcp._launch_grid`), the cooperative ones the co-resident count."""
+    ``ctas_per_sm x (SMs - reserve)`` CTAs (:func:`kcp._launch_grid`; ``reserve`` = ``kcp.SPLIT_RESERVE_SMS`` of the
+    architecture, else the record's ``reserve_sms``), the cooperative ones the co-resident count."""
 
     kcp = cake_package("cake_causal_conv1d_det_train", "kcp")
     assert kcp.COOPERATIVE_DEFAULT is False
@@ -333,18 +335,68 @@ def test_backward_launch_form_selects_the_route(monkeypatch) -> None:
             kcp._cooperative(bad)
     assert kcp._bwd_kind(True) == "kcp_bwd"
     assert kcp._bwd_kind(False) == "kcp_bwd_split"
-    for name, (_a, role, _p, ctas_per_sm) in PROGRAMS.items():
+    for name, (arches, role, _p, ctas_per_sm) in PROGRAMS.items():
         if role not in BWD_ROLES:
             continue
         record = kcp_jit.MODULES[name]
         full = (ctas_per_sm * 148, 1, 1)  # the co-resident grid of a 148-SM device
-        reserve = 1 if role == "kcp_bwd_split" else 0
         monkeypatch.setattr(kcp, "_record_launch_grid", lambda record, **_kw: full)
-        assert kcp._launch_grid(record, device_index=0) == (
-            ctas_per_sm * (148 - reserve),
-            1,
-            1,
+        for arch in arches:
+            reserve = (
+                kcp.SPLIT_RESERVE_SMS.get(arch, 1) if role == "kcp_bwd_split" else 0
+            )
+            assert kcp._launch_grid(record, device_index=0, arch=arch) == (
+                ctas_per_sm * (148 - reserve),
+                1,
+                1,
+            ), (name, arch)
+        if role == "kcp_bwd_split":
+            with pytest.raises(ValueError, match="needs the device's architecture"):
+                kcp._launch_grid(record, device_index=0)
+        else:
+            assert kcp._launch_grid(record, device_index=0) == full
+
+
+@pytest.mark.cpu_only
+def test_split_reserve_is_per_architecture(monkeypatch) -> None:
+    """``kcp.SPLIT_RESERVE_SMS``: the split backward leaves 10 SMs free on sm_103a and the record's one SM on sm_100a
+    and sm_107a; the records keep ``reserve_sms = 1``.  Only ``kcp_bwd_split`` grids change (the forward, the
+    cooperative backward and the head, tail-row and history-row programs keep theirs), and a grid that cannot give up
+    the reserved SMs is refused."""
+
+    kcp = cake_package("cake_causal_conv1d_det_train", "kcp")
+    assert kcp.SPLIT_RESERVE_SMS == {"sm_103a": 10}
+    for name, (arches, role, _p, ctas_per_sm) in PROGRAMS.items():
+        record = kcp_jit.MODULES[name]
+        if role == "kcp_bwd_split":
+            assert record["grid_rule"]["reserve_sms"] == 1, name
+        full = (ctas_per_sm * 152, 1, 1)  # the co-resident grid of a 152-SM device
+        monkeypatch.setattr(kcp, "_record_launch_grid", lambda record, **_kw: full)
+        for arch in arches:
+            got = kcp._launch_grid(record, device_index=0, arch=arch)
+            if role == "kcp_bwd_split":
+                want = ctas_per_sm * (152 - (10 if arch == "sm_103a" else 1))
+            elif role == kcp.KCP_FWD:
+                want = ctas_per_sm * (152 - kcp.FWD_RESERVE_SMS)
+            else:
+                want = full[0]
+            assert got == (want, 1, 1), (name, arch, got)
+    split_big = kcp_jit.MODULES[SPLIT_BIG]
+    for sms, ok in ((11, True), (10, False), (1, False)):
+        monkeypatch.setattr(
+            kcp, "_record_launch_grid", lambda record, _n=sms, **_kw: (2 * _n, 1, 1)
         )
+        if ok:
+            assert kcp._launch_grid(split_big, device_index=0, arch="sm_103a") == (
+                2,
+                1,
+                1,
+            )
+        else:
+            with pytest.raises(ValueError, match="cannot reserve 10 SM"):
+                kcp._launch_grid(split_big, device_index=0, arch="sm_103a")
+    monkeypatch.setattr(kcp, "_record_launch_grid", lambda record, **_kw: (2 * 2, 1, 1))
+    assert kcp._launch_grid(split_big, device_index=0, arch="sm_100a") == (2, 1, 1)
 
 
 @pytest.mark.cpu_only
