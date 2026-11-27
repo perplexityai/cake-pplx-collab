@@ -3352,8 +3352,8 @@ FORWARD_TINY_GAP = {"sm_107a": (16, 32, "fwd_short")}
 # heads with a token stride below twice the row, as padded rows; and a class
 # whose table has no entry for the architecture: head-major rows on sm_100a
 # and sm_103a, whole-token rows of one head on sm_107a, SLICED_FEW_LAYOUT on
-# sm_100a and sm_107a, MIXED_LAYOUT on sm_100a, PADH_LAYOUT on sm_100a and
-# sm_107a; the tiny forwards read packed rows only), and of packed rows from
+# sm_100a and sm_107a, MIXED_LAYOUT and PADH_LAYOUT on sm_100a and sm_107a;
+# the tiny forwards read packed rows only), and of packed rows from
 # PACKED_ROWS on, as FORWARD_BANDS.
 STRIDED_FORWARD_BANDS = {
     "sm_100a": (
@@ -3428,22 +3428,23 @@ HEAD_MAJOR_FORWARD_BANDS = {
 # stride 128 and token strides of at least 128, one of them past it and the
 # other 128: ``forward_layout`` gives SLICED_LAYOUT; a gate of one head sliced
 # from a projection, ``x`` of one head sliced beside packed ``z``), by
-# architecture (version 0.2.19): on sm_100a and sm_103a STRIDED_FORWARD_BANDS
-# but for ``fwd_layout_pipe`` from 600 to 1500 rows per SM (0.2.18: from 701);
-# an architecture without an entry (sm_107a) runs STRIDED_FORWARD_BANDS.
+# architecture (version 0.2.19 keeps 0.2.18's bands, V0218_SLICED_BANDS): on
+# sm_100a and sm_103a STRIDED_FORWARD_BANDS but for ``fwd_layout_pipe`` from
+# 701 to 1500 rows per SM; an architecture without an entry (sm_107a) runs
+# STRIDED_FORWARD_BANDS.
 SLICED_FORWARD_BANDS = {
     "sm_100a": (
         (12, "fwd_short"),
         (140, "fwd_mid"),
         (400, "fwd_long"),
-        (599, "fwd_xlong"),
+        (700, "fwd_xlong"),
         (1500, "fwd_layout_pipe"),
         (None, "fwd"),
     ),
     "sm_103a": (
         (12, "fwd_short"),
         (250, "fwd_mid"),
-        (599, "fwd_xlong"),
+        (700, "fwd_xlong"),
         (1500, "fwd_layout_pipe"),
         (None, "fwd"),
     ),
@@ -3455,15 +3456,16 @@ SLICED_FORWARD_BANDS = {
 # sliced beside packed ``z``, and from 4 heads ``x`` and ``z`` both sliced and
 # padded rows), by architecture (version 0.2.19; 0.2.18 ran them by
 # SLICED_FORWARD_BANDS of 0.2.18 on sm_100a and sm_103a and by
-# STRIDED_FORWARD_BANDS on sm_107a): ``fwd_layout_pipe`` from 600 to 2000 rows
-# per SM on sm_100a, from 650 to 1750 on sm_103a and from 650 to 1000 on
-# sm_107a (where the plain forward runs from 481 to 649).
+# STRIDED_FORWARD_BANDS on sm_107a): ``fwd_layout_pipe`` from 601 to 2000 rows
+# per SM on sm_100a (the extra-long forward up to 600), from 650 to 1750 on
+# sm_103a and from 650 to 1000 on sm_107a (where the plain forward runs from
+# 481 to 649).
 SLICED_HEADS_FORWARD_BANDS = {
     "sm_100a": (
         (12, "fwd_short"),
         (140, "fwd_mid"),
         (400, "fwd_long"),
-        (599, "fwd_xlong"),
+        (600, "fwd_xlong"),
         (2000, "fwd_layout_pipe"),
         (None, "fwd"),
     ),
@@ -3501,7 +3503,7 @@ SLICED_FEW_FORWARD_BANDS = {
 # packed ``z`` (``x`` of head stride 0 and token stride 128, ``z`` of head
 # stride 128 and token stride ``H * 128``: ``forward_layout`` gives
 # BCASTH_LAYOUT), by architecture (version 0.2.19; 0.2.18: no class):
-# STRIDED_FORWARD_BANDS but for ``fwd_layout_pipe`` from 1000 to 1500 rows per
+# STRIDED_FORWARD_BANDS but for ``fwd_layout_pipe`` from 1250 to 1500 rows per
 # SM on sm_100a, from 701 to 1500 on sm_103a and from 650 to 1500 on sm_107a.
 BCASTH_FORWARD_BANDS = {
     "sm_100a": (
@@ -3509,7 +3511,7 @@ BCASTH_FORWARD_BANDS = {
         (140, "fwd_mid"),
         (400, "fwd_long"),
         (700, "fwd_xlong"),
-        (999, "fwd"),
+        (1249, "fwd"),
         (1500, "fwd_layout_pipe"),
         (None, "fwd"),
     ),
@@ -3531,22 +3533,14 @@ BCASTH_FORWARD_BANDS = {
 # The forward bands of head-major ``x`` beside ``z`` of head stride 128 and a
 # token stride past ``H * 128`` (more than one head: ``forward_layout`` gives
 # MIXED_LAYOUT), by architecture (version 0.2.19; 0.2.18: no class):
-# STRIDED_FORWARD_BANDS but for ``fwd_layout_pipe`` from 701 to 1500 rows per
-# SM on sm_103a and from 650 to 1000 on sm_107a; sm_100a runs
-# STRIDED_FORWARD_BANDS.
+# STRIDED_FORWARD_BANDS but for ``fwd_layout_pipe`` from 701 to 1250 rows per
+# SM on sm_103a; sm_100a and sm_107a run STRIDED_FORWARD_BANDS.
 MIXED_FORWARD_BANDS = {
     "sm_103a": (
         (12, "fwd_short"),
         (250, "fwd_mid"),
         (700, "fwd_xlong"),
-        (1500, "fwd_layout_pipe"),
-        (None, "fwd"),
-    ),
-    "sm_107a": (
-        (59, "fwd_short"),
-        (480, "fwd_mid"),
-        (649, "fwd"),
-        (1000, "fwd_layout_pipe"),
+        (1250, "fwd_layout_pipe"),
         (None, "fwd"),
     ),
 }
@@ -3603,10 +3597,11 @@ V0219_NEW_CLASSES = (
 # name and architecture (every other table and architecture is unchanged; None:
 # no entry, so the class runs STRIDED_FORWARD_BANDS): the extra-long forward of
 # a gate sliced from a projection up to 629 rows per SM on sm_103a; whole-token
-# rows (of any number of heads in 0.2.18) the extra-long forward up to 700 and
-# ``fwd_layout_pipe`` up to 1500 on sm_100a and sm_103a, and
-# STRIDED_FORWARD_BANDS on sm_107a; the four other new classes, layouts of no
-# class in 0.2.18, STRIDED_FORWARD_BANDS everywhere.
+# rows of more than one head, which 0.2.18 ran by its whole-token table of any
+# number of heads (V0218_SLICED_BANDS, which SLICED_FORWARD_BANDS keeps for one
+# head), the extra-long forward up to 700 and ``fwd_layout_pipe`` up to 1500 on
+# sm_100a and sm_103a, and STRIDED_FORWARD_BANDS on sm_107a; the four other new
+# classes, layouts of no class in 0.2.18, STRIDED_FORWARD_BANDS everywhere.
 V0218_SLICED_BANDS = {
     "sm_100a": (
         (12, "fwd_short"),
@@ -3634,23 +3629,21 @@ V0218_FORWARD_BANDS = {
             (None, "fwd"),
         ),
     },
-    "SLICED_FORWARD_BANDS": dict(V0218_SLICED_BANDS),
     "SLICED_HEADS_FORWARD_BANDS": {**V0218_SLICED_BANDS, "sm_107a": None},
     "SLICED_FEW_FORWARD_BANDS": {"sm_103a": None},
     "BCASTH_FORWARD_BANDS": {"sm_100a": None, "sm_103a": None, "sm_107a": None},
-    "MIXED_FORWARD_BANDS": {"sm_103a": None, "sm_107a": None},
+    "MIXED_FORWARD_BANDS": {"sm_103a": None},
     "PADH_FORWARD_BANDS": {"sm_103a": None},
 }
 # The rows per SM ``(lo, hi]`` whose forward module version 0.2.19 moved, by
 # architecture and ``forward_layout`` class of rows that are not packed: each
 # ``(lo, hi, 0.2.18 role, 0.2.19 role)``, every one to ``fwd_layout_pipe`` from
-# 0.2.18's extra-long or plain forward (exactly the decided bands; rows of no
-# class, head-major rows and packed rows move nowhere).
+# 0.2.18's extra-long or plain forward (exactly the decided bands; whole-token
+# rows of one head, rows of no class, head-major rows, packed rows and
+# head-major ``x`` beside a sliced ``z`` on sm_107a move nowhere).
 V0219_MOVED_BANDS = {
-    ("sm_100a", SLICED_LAYOUT): ((599, 700, "fwd_xlong", "fwd_layout_pipe"),),
-    ("sm_103a", SLICED_LAYOUT): ((599, 700, "fwd_xlong", "fwd_layout_pipe"),),
     ("sm_100a", SLICED_HEADS_LAYOUT): (
-        (599, 700, "fwd_xlong", "fwd_layout_pipe"),
+        (600, 700, "fwd_xlong", "fwd_layout_pipe"),
         (1500, 2000, "fwd", "fwd_layout_pipe"),
     ),
     ("sm_103a", SLICED_HEADS_LAYOUT): (
@@ -3659,31 +3652,30 @@ V0219_MOVED_BANDS = {
     ),
     ("sm_107a", SLICED_HEADS_LAYOUT): ((649, 1000, "fwd", "fwd_layout_pipe"),),
     ("sm_103a", SLICED_FEW_LAYOUT): ((700, 1500, "fwd", "fwd_layout_pipe"),),
-    ("sm_100a", BCASTH_LAYOUT): ((999, 1500, "fwd", "fwd_layout_pipe"),),
+    ("sm_100a", BCASTH_LAYOUT): ((1249, 1500, "fwd", "fwd_layout_pipe"),),
     ("sm_103a", BCASTH_LAYOUT): ((700, 1500, "fwd", "fwd_layout_pipe"),),
     ("sm_107a", BCASTH_LAYOUT): ((649, 1500, "fwd", "fwd_layout_pipe"),),
-    ("sm_103a", MIXED_LAYOUT): ((700, 1500, "fwd", "fwd_layout_pipe"),),
-    ("sm_107a", MIXED_LAYOUT): ((649, 1000, "fwd", "fwd_layout_pipe"),),
+    ("sm_103a", MIXED_LAYOUT): ((700, 1250, "fwd", "fwd_layout_pipe"),),
     ("sm_103a", PADH_LAYOUT): ((700, 1500, "fwd", "fwd_layout_pipe"),),
     ("sm_103a", PROJECTION_LAYOUT): ((619, 629, "fwd_xlong", "fwd_layout_pipe"),),
 }
 # The ``fwd_layout_pipe`` band ``(lo, hi]`` of rows per SM of each class table
-# version 0.2.19 changed or added but PROJECTION_FORWARD_BANDS, by class and
-# architecture (the decided bands).
+# but PROJECTION_FORWARD_BANDS and HEAD_MAJOR_FORWARD_BANDS, by class and
+# architecture (the decided bands; for SLICED_FORWARD_BANDS those of 0.2.18).
 V0219_PIPE_BANDS = {
-    SLICED_LAYOUT: {"sm_100a": (599, 1500), "sm_103a": (599, 1500)},
+    SLICED_LAYOUT: {"sm_100a": (700, 1500), "sm_103a": (700, 1500)},
     SLICED_HEADS_LAYOUT: {
-        "sm_100a": (599, 2000),
+        "sm_100a": (600, 2000),
         "sm_103a": (649, 1750),
         "sm_107a": (649, 1000),
     },
     SLICED_FEW_LAYOUT: {"sm_103a": (700, 1500)},
     BCASTH_LAYOUT: {
-        "sm_100a": (999, 1500),
+        "sm_100a": (1249, 1500),
         "sm_103a": (700, 1500),
         "sm_107a": (649, 1500),
     },
-    MIXED_LAYOUT: {"sm_103a": (700, 1500), "sm_107a": (649, 1000)},
+    MIXED_LAYOUT: {"sm_103a": (700, 1250)},
     PADH_LAYOUT: {"sm_103a": (700, 1500)},
 }
 # The pipelined forwards of 0.2.17: builds of ``fwd_pipe`` (sm_100a, and
@@ -3912,19 +3904,24 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
     assert set(SLICED_HEADS_FORWARD_BANDS) == set(loader.ARCHES)
     assert set(SLICED_FEW_FORWARD_BANDS) == {"sm_103a"}
     assert set(BCASTH_FORWARD_BANDS) == set(loader.ARCHES)
-    assert set(MIXED_FORWARD_BANDS) == {"sm_103a", "sm_107a"}
+    assert set(MIXED_FORWARD_BANDS) == {"sm_103a"}
     assert set(PADH_FORWARD_BANDS) == {"sm_103a"}
+    # whole-token rows of one head run 0.2.18's bands
+    assert SLICED_FORWARD_BANDS == V0218_SLICED_BANDS
     # the classes 0.2.19 added: every class with a table but 0.2.18's three,
-    # and every class of a moved band but 0.2.18's two whose bands moved
+    # and every class of a moved band but the projection's, the one class of
+    # 0.2.18 whose bands moved (whole-token rows of one head move nowhere)
     new_classes = set(V0219_NEW_CLASSES)
     assert len(new_classes) == len(V0219_NEW_CLASSES) == 5
     old_classes = {PROJECTION_LAYOUT, HEAD_MAJOR_LAYOUT, SLICED_LAYOUT}
     assert set(LAYOUT_FORWARD_BANDS) - old_classes == new_classes
     moved_classes = {layout for _, layout in V0219_MOVED_BANDS}
-    assert moved_classes - {PROJECTION_LAYOUT, SLICED_LAYOUT} == new_classes
+    assert SLICED_LAYOUT not in moved_classes
+    assert moved_classes - {PROJECTION_LAYOUT} == new_classes
 
-    # every class table 0.2.19 changed or added but PROJECTION_FORWARD_BANDS
-    # runs, at every number of rows per SM, the module of STRIDED_FORWARD_BANDS
+    # every class table but PROJECTION_FORWARD_BANDS and
+    # HEAD_MAJOR_FORWARD_BANDS runs, at every number of rows per SM, the
+    # module of STRIDED_FORWARD_BANDS
     # of its architecture but for ``fwd_layout_pipe`` in its band ``(lo, hi]``
     # of V0219_PIPE_BANDS, with no two adjacent bands of one role
     def role_at(bands, per_sm):
@@ -4239,7 +4236,8 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
     # ``x`` broadcast over heads (BCASTH_FORWARD_BANDS), head-major ``x``
     # beside sliced ``z`` (MIXED_FORWARD_BANDS), padded heads
     # (PADH_FORWARD_BANDS) and head-major rows (HEAD_MAJOR_FORWARD_BANDS),
-    # where the architecture has the table
+    # where the architecture has the table, and head-major ``x`` beside sliced
+    # ``z`` on sm_107a, which has no entry (STRIDED_FORWARD_BANDS)
     for arch, layout, cases in (
         (
             "sm_100a",
@@ -4314,11 +4312,12 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
                 (400 * sm_count, "fwd_long"),
                 (400 * sm_count + 1, "fwd_xlong"),
                 (599 * sm_count, "fwd_xlong"),
-                (599 * sm_count + 1, "fwd_layout_pipe"),
-                (600 * sm_count, "fwd_layout_pipe"),
-                (650 * sm_count, "fwd_layout_pipe"),
-                (700 * sm_count, "fwd_layout_pipe"),
+                (599 * sm_count + 1, "fwd_xlong"),
+                (600 * sm_count, "fwd_xlong"),
+                (650 * sm_count, "fwd_xlong"),
+                (700 * sm_count, "fwd_xlong"),
                 (700 * sm_count + 1, "fwd_layout_pipe"),
+                (701 * sm_count, "fwd_layout_pipe"),
                 (1000 * sm_count, "fwd_layout_pipe"),
                 (1500 * sm_count, "fwd_layout_pipe"),
                 (1500 * sm_count + 1, "fwd"),
@@ -4335,11 +4334,12 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
                 (250 * sm_count, "fwd_mid"),
                 (250 * sm_count + 1, "fwd_xlong"),
                 (599 * sm_count, "fwd_xlong"),
-                (599 * sm_count + 1, "fwd_layout_pipe"),
-                (600 * sm_count, "fwd_layout_pipe"),
-                (650 * sm_count, "fwd_layout_pipe"),
-                (700 * sm_count, "fwd_layout_pipe"),
+                (599 * sm_count + 1, "fwd_xlong"),
+                (600 * sm_count, "fwd_xlong"),
+                (650 * sm_count, "fwd_xlong"),
+                (700 * sm_count, "fwd_xlong"),
                 (700 * sm_count + 1, "fwd_layout_pipe"),
+                (701 * sm_count, "fwd_layout_pipe"),
                 (1000 * sm_count, "fwd_layout_pipe"),
                 (1500 * sm_count, "fwd_layout_pipe"),
                 (1500 * sm_count + 1, "fwd"),
@@ -4358,8 +4358,10 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
                 (400 * sm_count, "fwd_long"),
                 (400 * sm_count + 1, "fwd_xlong"),
                 (599 * sm_count, "fwd_xlong"),
-                (599 * sm_count + 1, "fwd_layout_pipe"),
-                (600 * sm_count, "fwd_layout_pipe"),
+                (599 * sm_count + 1, "fwd_xlong"),
+                (600 * sm_count, "fwd_xlong"),
+                (600 * sm_count + 1, "fwd_layout_pipe"),
+                (601 * sm_count, "fwd_layout_pipe"),
                 (700 * sm_count, "fwd_layout_pipe"),
                 (700 * sm_count + 1, "fwd_layout_pipe"),
                 (1500 * sm_count, "fwd_layout_pipe"),
@@ -4447,8 +4449,10 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
                 (701 * sm_count, "fwd"),
                 (850 * sm_count, "fwd"),
                 (999 * sm_count, "fwd"),
-                (999 * sm_count + 1, "fwd_layout_pipe"),
-                (1000 * sm_count, "fwd_layout_pipe"),
+                (999 * sm_count + 1, "fwd"),
+                (1000 * sm_count, "fwd"),
+                (1249 * sm_count, "fwd"),
+                (1249 * sm_count + 1, "fwd_layout_pipe"),
                 (1250 * sm_count, "fwd_layout_pipe"),
                 (1500 * sm_count, "fwd_layout_pipe"),
                 (1500 * sm_count + 1, "fwd"),
@@ -4509,7 +4513,10 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
                 (700 * sm_count + 1, "fwd_layout_pipe"),
                 (701 * sm_count, "fwd_layout_pipe"),
                 (1000 * sm_count, "fwd_layout_pipe"),
-                (1500 * sm_count, "fwd_layout_pipe"),
+                (1250 * sm_count, "fwd_layout_pipe"),
+                (1250 * sm_count + 1, "fwd"),
+                (1251 * sm_count, "fwd"),
+                (1500 * sm_count, "fwd"),
                 (1500 * sm_count + 1, "fwd"),
                 (1501 * sm_count, "fwd"),
                 (2**31 - 1, "fwd"),
@@ -4524,9 +4531,9 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
                 (480 * sm_count, "fwd_mid"),
                 (480 * sm_count + 1, "fwd"),
                 (649 * sm_count, "fwd"),
-                (649 * sm_count + 1, "fwd_layout_pipe"),
-                (650 * sm_count, "fwd_layout_pipe"),
-                (1000 * sm_count, "fwd_layout_pipe"),
+                (649 * sm_count + 1, "fwd"),
+                (650 * sm_count, "fwd"),
+                (1000 * sm_count, "fwd"),
                 (1000 * sm_count + 1, "fwd"),
                 (1001 * sm_count, "fwd"),
                 (1500 * sm_count, "fwd"),
@@ -4592,8 +4599,8 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
         assert got == want, rows
     # a class whose table has no entry for the architecture runs the programs
     # of STRIDED_FORWARD_BANDS: head-major rows on sm_100a and sm_103a,
-    # whole-token rows of one head on sm_107a, SLICED_FEW_LAYOUT on sm_100a and
-    # sm_107a, MIXED_LAYOUT on sm_100a, PADH_LAYOUT on sm_100a and sm_107a
+    # whole-token rows of one head on sm_107a, SLICED_FEW_LAYOUT, MIXED_LAYOUT
+    # and PADH_LAYOUT on sm_100a and sm_107a
     no_table = {
         (arch, layout)
         for arch in loader.ARCHES
@@ -4607,11 +4614,12 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
         ("sm_100a", SLICED_FEW_LAYOUT),
         ("sm_107a", SLICED_FEW_LAYOUT),
         ("sm_100a", MIXED_LAYOUT),
+        ("sm_107a", MIXED_LAYOUT),
         ("sm_100a", PADH_LAYOUT),
         ("sm_107a", PADH_LAYOUT),
     }
-    per_sm_edges = (12, 59, 140, 250, 400, 480, 599, 619, 629, 649, 700)
-    per_sm_edges += (999, 1000, 1500, 1750, 2000, 2999, 3000)
+    per_sm_edges = (12, 59, 140, 250, 400, 480, 599, 600, 619, 629, 649, 700)
+    per_sm_edges += (999, 1000, 1249, 1250, 1500, 1750, 2000, 2999, 3000)
     for arch, layout in sorted(no_table):
         for per_sm in per_sm_edges:
             for rows in (per_sm * sm_count, per_sm * sm_count + 1):
@@ -6045,10 +6053,9 @@ def test_forward_runs_the_table_of_the_rows_class(monkeypatch):
     an entry (``LAYOUT_FORWARD_BANDS``, version 0.2.19): a gate sliced from a
     projection and SLICED_HEADS_LAYOUT and BCASTH_LAYOUT rows on every
     architecture, head-major rows on sm_107a only, whole-token rows of one
-    head on sm_100a and sm_103a only, SLICED_FEW_LAYOUT and PADH_LAYOUT rows
-    on sm_103a only and MIXED_LAYOUT rows on sm_103a and sm_107a; padded rows
-    of 1 to 3 heads and ``x`` and ``z`` both sliced of one head run the table
-    of no class."""
+    head on sm_100a and sm_103a only, and SLICED_FEW_LAYOUT, MIXED_LAYOUT and
+    PADH_LAYOUT rows on sm_103a only; padded rows of 1 to 3 heads and ``x``
+    and ``z`` both sliced of one head run the table of no class."""
     sm_count = 2
     for arch in loader.ARCHES:
         calls = _host_forward(monkeypatch, arch, sm_count)

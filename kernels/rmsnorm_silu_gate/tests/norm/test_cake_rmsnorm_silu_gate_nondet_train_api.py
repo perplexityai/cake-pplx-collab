@@ -63,7 +63,7 @@ checks:
   128, so packed one-head rows pass the kernels' packed-rows test), and the
   forward's host plan against version 0.2.18's tables and classes, by class
   and by input form (the module differs only in the bands version 0.2.19
-  moved: whole-token rows of one head and of more heads, ``x`` and ``z``
+  moved: whole-token rows of more than one head, ``x`` and ``z``
   both sliced of 2 or 3 heads, ``x`` broadcast over heads, head-major ``x``
   beside a sliced ``z``, padded heads and, on sm_103a, a gate of more than
   one head sliced from a projection);
@@ -1715,20 +1715,19 @@ def test_forward_plan_differs_from_0_2_18_only_in_the_moved_bands(
     module it gives with version 0.2.18's tables put back
     (:func:`_put_back_0_2_18_tables`) but in the bands of
     ``suite.V0219_MOVED_BANDS``, where it gives ``fwd_layout_pipe`` in the
-    place of 0.2.18's extra-long or plain forward: on sm_100a and sm_103a
-    whole-token rows of one head past 599 rows per SM up to 700, on sm_100a
-    whole-token rows of more heads past 599 up to 700 and past 1500 up to
-    2000, on sm_103a past 649 up to 700 and past 1500 up to 1750 and on
-    sm_107a past 649 up to 1000; ``x`` and ``z`` both sliced of 2 or 3 heads,
-    ``x`` broadcast over heads, head-major ``x`` beside a sliced ``z`` and
-    padded heads on sm_103a past 700 up to 1500, ``x`` broadcast over heads
-    on sm_100a past 999 up to 1500 and on sm_107a past 649 up to 1500,
-    head-major ``x`` beside a sliced ``z`` on sm_107a past 649 up to 1000,
-    and a gate of more than one head sliced from a projection on sm_103a
-    past 619 up to 629.  Every moved band holds rows of the comparison;
-    packed rows, rows of no class, head-major rows and every other band run
-    what 0.2.18 ran: rows of no class in each moved band the module the
-    moved class ran there in 0.2.18."""
+    place of 0.2.18's extra-long or plain forward: whole-token rows of more than
+    one head on sm_100a past 600 rows per SM up to 700 and past 1500 up to 2000,
+    on sm_103a past 649 up to 700 and past 1500 up to 1750 and on sm_107a past
+    649 up to 1000; ``x`` and ``z`` both sliced of 2 or 3 heads, ``x`` broadcast
+    over heads and padded heads on sm_103a past 700 up to 1500, ``x`` broadcast
+    over heads on sm_100a past 1249 up to 1500 and on sm_107a past 649 up to
+    1500, head-major ``x`` beside a sliced ``z`` on sm_103a past 700 up to 1250,
+    and a gate of more than one head sliced from a projection on sm_103a past
+    619 up to 629.  Every moved band holds rows of the comparison; packed rows,
+    rows of no class, head-major rows, whole-token rows of one head, head-major
+    ``x`` beside a sliced ``z`` on sm_100a and sm_107a and every other band run
+    what 0.2.18 ran: rows of no class in each moved band the module the moved
+    class ran there in 0.2.18."""
     for name in (
         "PROJECTION_FORWARD_BANDS",
         "STRIDED_FORWARD_BANDS",
@@ -1958,19 +1957,18 @@ def test_forward_plan_of_every_form_differs_from_0_2_18_only_in_the_moved_bands(
     :func:`_put_back_0_2_18_tables`, and its class,
     :func:`_forward_layout_0_2_18`) but where 0.2.19 moved it
     (``suite.V0219_MOVED_BANDS``), each band of the form's class on each
-    architecture moving: whole-token rows of one head (a gate of one head
-    sliced from a projection, ``x`` of one head sliced beside packed ``z``,
-    a head-major ``x`` of one head beside such a gate) on sm_100a and
-    sm_103a; whole-token rows of more heads (``x`` sliced beside packed
-    ``z``, from 4 heads ``x`` and ``z`` both sliced and padded rows) on every
-    architecture; ``x`` and ``z`` both sliced of 2 or 3 heads and padded
-    heads on sm_103a; ``x`` broadcast over heads on every architecture; a
-    head-major ``x`` beside a sliced ``z`` of more than one head on sm_103a
-    and sm_107a; a gate of more than one head sliced from a projection on
-    sm_103a.  Padded rows of 1 to 3 heads, ``x`` and ``z`` both sliced of
-    one head, padded heads of one head, broadcasts over tokens, padded
-    head-major planes, head-major rows and every other architecture of a
-    class run what 0.2.18 ran."""
+    architecture moving: whole-token rows of more heads (``x`` sliced beside
+    packed ``z``, from 4 heads ``x`` and ``z`` both sliced and padded rows) on
+    every architecture; ``x`` and ``z`` both sliced of 2 or 3 heads, padded
+    heads and a head-major ``x`` beside a sliced ``z`` of more than one head on
+    sm_103a; ``x`` broadcast over heads on every architecture; a gate of more
+    than one head sliced from a projection on sm_103a.  Whole-token rows of one
+    head (a gate of one head sliced from a projection, ``x`` of one head sliced
+    beside packed ``z``, a head-major ``x`` of one head beside such a gate),
+    padded rows of 1 to 3 heads, ``x`` and ``z`` both sliced of one head, padded
+    heads of one head, broadcasts over tokens, padded head-major planes,
+    head-major rows and every other architecture of a class run what 0.2.18
+    ran."""
     cases = []
     for form, classes in FORM_CLASSES.items():
         for heads, cls in zip(FORM_HEADS, classes, strict=True):
