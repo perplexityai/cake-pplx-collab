@@ -348,24 +348,47 @@ word (`dhu_tc2_dvl32_modes_dvlo` and the `_dvlo` tails, `MODES_DV_LO`), with
 the same effect on the bits.  `PV_TF32 = False` keeps the 0.2.8 programs on
 every call, this route included.
 
-Some calls on the `pv_tf32` programs miss the BF16 naive tier on `dg`, and
-the 0.2.8 programs miss it on the same calls.  On B200, GB300 and R200 these
-are:
+Some calls on the `pv_tf32` programs or on the `MODES_DV_LO` route miss the
+BF16 naive tier, and the 0.2.8 programs miss it on the same calls.  On B200,
+GB300 and R200 these are:
 
 - the split forward at `G = 2` with the `(64, 1)` tcgen05 adjoint: the
   largest L2 error of `dg` is 1.007 to 1.008 times the tier's (0.2.8: 1.040
   times);
 - the serial tcgen05 adjoint on two streams at `G = 2`: the largest L2 error
-  of `dg` is 1.23 times the tier's (0.2.8: 1.28 times).
+  of `dg` is 1.23 times the tier's (0.2.8: 1.28 times);
+- the `MODES_DV_LO` route with an FP32 `beta` at `G = 1` (the package tail):
+  the largest L2 error of `dv` is 1.028 times the tier's (0.2.10, which runs
+  the 0.2.8 programs on this route: 1.169 times);
+- the `MODES_DV_LO` route with an FP32 `beta` at `G = 2` to `4`: `dg`, with
+  its 0.2.10 bits.  Its largest L2 error is 1.033 to 1.034 times the tier's
+  at `G = 2` and 1.094 to 1.095 times at `G = 3`; at `G = 4` its median L2
+  error is 1.011 times the tier's;
+- on B200 and GB300, the `MODES_DV_LO` route under M-share with an FP32
+  `beta`: `dg`, with its 0.2.10 bits.  At `G = 2` its largest L2 error is
+  1.070 (B200) and 1.132 (GB300) times the tier's, and on GB300 its median L2
+  error is 1.015 times the tier's and its max-norm error meets the tier on 15
+  of 32 draws; at `G = 3` its largest L2 error is 1.177 (B200) and 1.196
+  (GB300) times the tier's.
 
-Both hold with or without an initial state.  The tests reach these
-routes with plan pins or a patched planner on small layouts.  A call that the
-fix does not reach keeps the 0.2.8 programs, bits and accuracy, including the
-misses of 0.2.8.
+All hold with or without an initial state.  On the small layout of the
+`MODES_DV_LO` items (700, 1,500 and 230 tokens) with an FP32 `beta` and a
+final-state gradient, the max-norm error of the forward output `o` meets the
+tier on 15 of 32 draws at `G = 2` without an initial state and on 14 of 32
+at `G = 4` with or without one; 0.2.10 gives the same bits.  The tests reach
+these routes with plan pins or a patched planner on small layouts.  A call
+that the fix does not reach keeps the 0.2.8 programs, bits and accuracy,
+including the misses of 0.2.8.
 
 In 0.2.5 `wy_a` is built from newer kernel source under the same program
 name: each compute warp owns the ring slots of its parity.  Routes, launch
 records and output bits are those of 0.2.4.
+
+In 0.2.11 `wy_a`, `fwd_ho`, `fwd_ho_vh2` (on every architecture), `fwd_fused`
+and `dhu_tc2_dvl32_gm` are built from newer kernel source under the same
+program names: the first four add memory-ordering fences
+(`fence.proxy.async.shared::cta`), and `dhu_tc2_dvl32_gm` reworks its warp
+vote.  Routes, launch records and output bits are those of 0.2.10.
 
 On the shapes of the speed table below, `sm_100a` (B200, GB200) and `sm_103a`
 (GB300) run the split forward on `fwd_ho_a` on the three `(2, 6)` packs and
@@ -751,5 +774,7 @@ span rises by 0.17-0.21 ms.
 - Head dimension 128 and chunk 64 only; `q`, `k`, `v` BF16.
 - No context parallelism and no cross-rank state passing.
 - `sm_100a`, `sm_103a` and `sm_107a` only (`sm_107a` with CUDA 13.5 or newer).
-- Some calls with a final-state gradient miss the BF16 naive tier on `dg`;
-  Chain lists them.
+- Some calls with a final-state gradient miss the BF16 naive tier on `dg`,
+  one route on `dv` (`MODES_DV_LO` at `G = 1` with an FP32 `beta`: the
+  largest L2 error is 1.028 times the tier's; 0.2.10: 1.169 times) and two
+  calls of one small layout on the max-norm error of `o`; Chain lists them.
