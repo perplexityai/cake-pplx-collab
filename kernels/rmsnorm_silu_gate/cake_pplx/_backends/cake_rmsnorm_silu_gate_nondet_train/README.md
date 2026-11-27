@@ -267,7 +267,7 @@ rows per SM on B200 and GB300, padded rows of 4 heads at 599.03 on B200, `x`
 broadcast over 16 heads at 999.03 and 1000 on B200, and head-major `x` beside
 a sliced `z` of 2 heads at 1500 on GB300 and at 649.01, 650 and 1000 on the
 VR200 node with driver 620.70.06.  A second release measurement (the same
-protocol, with every band as now but `fwd_layout_pipe` from 620 rows per SM
+protocol, with every band as now but `fwd_layout_pipe` above 619 rows per SM
 for a gate of more than one head sliced from a projection on `sm_103a`) found
 the checkpointed step of such a gate of 64 heads at 619.79 rows per SM on
 GB300 1.0049 of 0.2.18's time with a BF16 `dw`, so that gate runs
@@ -810,7 +810,7 @@ forms), every form passed from 619.79 to 628.95 rows per SM, while 64 heads
 failed at 609.68 and 16 and 48 heads at 600; the release measurement against
 0.2.18 (the same forms) found every form passing from 619.05 to 628.95 rows
 per SM, and a second release measurement (the same protocol, with
-`fwd_layout_pipe` from 620 rows per SM there and every other table as it is
+`fwd_layout_pipe` above 619 rows per SM there and every other table as it is
 now) found the checkpointed step of 64 heads at 619.79 rows per SM 1.0049 of
 0.2.18's time with a BF16 `dw`; both found every form passing from 624.84 (64
 heads) and 624.95 (16 and 48 heads) to 628.95 rows per SM, so the cut lies

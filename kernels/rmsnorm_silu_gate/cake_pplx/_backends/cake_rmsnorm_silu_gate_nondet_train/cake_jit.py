@@ -3635,7 +3635,7 @@ STRIDED_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
 # and 16 and 48 heads at 600.  The release measurement of 0.2.19 against 0.2.18
 # on GB300 (the comment of ``SLICED_FORWARD_BANDS``; the same forms) found
 # every form passing from 619.05 to 628.95 rows per SM, and a second release
-# measurement (the same protocol, with ``fwd_layout_pipe`` from 620 rows per SM
+# measurement (the same protocol, with ``fwd_layout_pipe`` above 619 rows per SM
 # here and every other table as it is now) found the checkpointed step of 64
 # heads at 619.79 rows per SM 1.0049 of 0.2.18's time with a BF16 weight
 # gradient; both found every form passing from 624.84 (64 heads) and 624.95 (16

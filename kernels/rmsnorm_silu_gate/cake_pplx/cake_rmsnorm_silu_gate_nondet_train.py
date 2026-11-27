@@ -239,7 +239,7 @@ GB300, padded rows of 4 heads at 599.03 on B200, ``x`` broadcast over 16
 heads at 999.03 and 1000 on B200, and head-major ``x`` beside a sliced ``z``
 of 2 heads at 1500 on GB300 and at 649.01, 650 and 1000 on the VR200 node
 with driver 620.70.06.  A second release measurement (the same protocol,
-with every band as now but the pipelined forward from 620 rows per SM for a
+with every band as now but the pipelined forward above 619 rows per SM for a
 gate of more than one head sliced from a projection on SM103) found the
 checkpointed step of such a gate of 64 heads at 619.79 rows per SM on GB300
 1.0049 of 0.2.18's time with a BF16 weight gradient, so that gate runs the
