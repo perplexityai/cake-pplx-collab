@@ -13,14 +13,14 @@ dv_j = bf16(p_j dout + ds_j r_j w - (ds_j d_j r_j^3 / 7168) v_j)   dw = sum over
 The backward evaluates `ds_j = p_j ((dp_j - dp_c) - sum_i p_i (dp_i - dp_c))`, `c` the value of the largest `p_j` (the
 first on ties): the same value, without the cancellation of `dp_c - sum_i p_i dp_i` when `p_c` rounds to 1.
 
-The facade `cake_pplx.cake_attn_res_det_train` is a stable API; this backend package is experimental (no
-compatibility guarantee for its internal names). SM100 (B200 / GB200), SM103 (B300 / GB300) and SM107 (Rubin) are the
-supported architectures; another device raises `RuntimeError`. The `sm_107a` libraries pass the package tests on
-VR200 and R200. At 0.1.2, compute-sanitizer passes on VR200 for the new forwards of 5 to 9 values; the other programs
-passed there and on R200 at 0.1.0. Its libraries are loaded prebuilt from `aot/` when a builder
-compiled them and JIT-built from the sources and flags `build.json` records otherwise. Kernel selection and launches
-read no environment variable; the JIT build shim (`_cake_pplx_jit.py`) reads `CUDA_HOME` / `CUDA_PATH`, `CXX` and the
-`CAKE_PPLX_*` build settings of the root README.
+The facade `cake_pplx.cake_attn_res_det_train` is a stable API; this backend package is experimental (no compatibility
+guarantee for its internal names). SM100 (B200 / GB200), SM103 (B300 / GB300) and SM107 (Rubin) are the supported
+architectures; another device raises `RuntimeError`. The `sm_107a` libraries pass the package tests on VR200 and R200.
+At 0.1.2, compute-sanitizer passes on VR200 for the new forwards of 5 to 9 values (on kernel-level builds of the same
+sources); the other programs passed there and on R200 at 0.1.0. Its libraries are loaded prebuilt from `aot/` when a
+builder compiled them and JIT-built from the sources and flags `build.json` records otherwise. Kernel selection and
+launches read no environment variable; the JIT build shim (`_cake_pplx_jit.py`) reads `CUDA_HOME` / `CUDA_PATH`, `CXX`
+and the `CAKE_PPLX_*` build settings of the root README.
 
 ## Opt-in
 
