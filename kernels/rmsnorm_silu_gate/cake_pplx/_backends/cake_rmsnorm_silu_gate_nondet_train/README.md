@@ -259,22 +259,23 @@ backward and the checkpointed step of either weight gradient) was slower
 beyond noise and the forward was no slower than the deterministic package's.
 The release measurement against 0.2.18 on the same GPUs (more forms and head
 counts; CUDA Graph replays, CUPTI, cold L2, four processes) then found an op
-slower than 0.2.18's beyond noise at some of those points, and 0.2.19 runs
-0.2.18's programs there for every form of the class: whole-token rows of one
-head with `z` and `dy` sliced from a tensor four times the row width and
-packed `x` at 599.01, 600, 650 and 700 rows per SM on B200 and GB300, padded
-rows of 4 heads at 599.03 on B200, `x` broadcast over 16 heads at 999.03 and
-1000 on B200, and head-major `x` beside a sliced `z` of 2 heads at 1500 on
-GB300 and at 649.01, 650 and 1000 on the VR200 node with driver 620.70.06.
-The points, forms and times are under "Programs and routes".  `y` bits: where
-`fwd_layout_pipe` runs in the place of the plain forward on `sm_100a` and
-`sm_103a`, `y` was the same bits where compared; in the place of the
-extra-long forward `y` can differ in the last bits of a few elements (the
-programs associate a row's sum of squares differently); on `sm_107a`, where
-`fwd_layout_pipe` runs in the place of the plain forward, `y` differed from
-the plain forward's bits in every compared case, its accuracy against a
-float64 reference passed, and `dx`, `dz` and `dw` were the same bits.  `dx`,
-`dz` and `dw` do not change (no backward changes).
+whose programs differ from 0.2.18's slower than 0.2.18's beyond noise at some
+points of the moved bands, and 0.2.19 runs 0.2.18's programs there for every
+form of the class: whole-token rows of one head with `z` and `dy` sliced from
+a tensor four times the row width and packed `x` at 599.01, 600, 650 and 700
+rows per SM on B200 and GB300, padded rows of 4 heads at 599.03 on B200, `x`
+broadcast over 16 heads at 999.03 and 1000 on B200, and head-major `x` beside
+a sliced `z` of 2 heads at 1500 on GB300 and at 649.01, 650 and 1000 on the
+VR200 node with driver 620.70.06.  The points, forms and times are under
+"Programs and routes".  `y` bits: where `fwd_layout_pipe` runs in the place
+of the plain forward on `sm_100a` and `sm_103a`, `y` was the same bits where
+compared; in the place of the extra-long forward `y` can differ in the last
+bits of a few elements (the programs associate a row's sum of squares
+differently); on `sm_107a`, where `fwd_layout_pipe` runs in the place of the
+plain forward, `y` differed from the plain forward's bits in every compared
+case, its accuracy against a float64 reference passed, and `dx`, `dz` and
+`dw` were the same bits.  `dx`, `dz` and `dw` do not change (no backward
+changes).
 A band runs a program whose `dw` may vary
 only where the band-selection measurement found the checkpointed training
 step (2 x forward + backward) about 3 % or more faster than with the
@@ -669,8 +670,9 @@ faster than 0.2.18's, no op (the forward, the backward and the checkpointed
 step of either weight gradient) slower than 0.2.18's beyond noise, and the
 forward no slower than the deterministic package's.  The release measurement
 (CUDA Graph replays, CUPTI, cold L2, four processes; more forms and head
-counts) then checked the moved bands: a point passes where no op is slower
-than 0.2.18's beyond noise.  A band moves only over points that pass both.
+counts) then checked the moved bands: a point passes where no op whose
+programs differ from 0.2.18's is slower than 0.2.18's beyond noise.  A band
+moves only over points that pass both.
 
 * Whole-token rows of one head (`SLICED_FORWARD_BANDS`): a gate of one head
   sliced from a projection and `x` of one head sliced beside packed `z` passed

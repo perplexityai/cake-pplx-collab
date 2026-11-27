@@ -3716,19 +3716,20 @@ HEAD_MAJOR_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
 # step of either weight gradient) is slower than 0.2.18's beyond noise, and the
 # forward is not slower than the deterministic package's, and checked them by
 # its release measurement against 0.2.18 on the same GPU (CUDA Graph replays,
-# CUPTI, cold L2, four processes), which passes a point where no op is slower
-# than 0.2.18's beyond noise; 0.2.19 moves a band only over points that passed
-# both.  On B200 and GB300 the first measurement passed a gate of one head
-# sliced from a projection and ``x`` of one head sliced beside packed ``z`` at
-# 600, 650 and 700 rows per SM, and so did the release measurement at 599.01,
-# 600, 650 and 700 (and a head-major ``x`` of one head beside such a gate), but
-# it found the checkpointed step of ``z`` and ``dy`` sliced from a tensor four
-# times the row width, packed ``x``, slower with ``fwd_layout_pipe`` at every
-# one of these points: on B200 1.0065 to 1.0335 of 0.2.18's time with a BF16
-# weight gradient and 1.0057 to 1.0263 with an FP32 one, on GB300 1.0057 to
-# 1.0375 with a BF16 weight gradient and 1.0174 to 1.0244 with an FP32 one (at
-# 599.01, 600 and 650), so the extra-long forward still runs up to 700 rows per
-# SM.  Host plan only, as the other tables.
+# CUPTI, cold L2, four processes), which passes a point where no op whose
+# programs differ from 0.2.18's is slower than 0.2.18's beyond noise; 0.2.19
+# moves a band only over points that passed both.  On B200 and GB300 the first
+# measurement passed a gate of one head sliced from a projection and ``x`` of
+# one head sliced beside packed ``z`` at 600, 650 and 700 rows per SM, and so
+# did the release measurement at 599.01, 600, 650 and 700 (and a head-major
+# ``x`` of one head beside such a gate), but it found the checkpointed step of
+# ``z`` and ``dy`` sliced from a tensor four times the row width, packed ``x``,
+# slower with ``fwd_layout_pipe`` at every one of these points: on B200 1.0065
+# to 1.0335 of 0.2.18's time with a BF16 weight gradient and 1.0057 to 1.0263
+# with an FP32 one, on GB300 1.0057 to 1.0375 with a BF16 weight gradient and
+# 1.0174 to 1.0244 with an FP32 one (at 599.01, 600 and 650), so the extra-long
+# forward still runs up to 700 rows per SM.  Host plan only, as the other
+# tables.
 SLICED_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
     "sm_100a": (
         (12, "fwd_short"),

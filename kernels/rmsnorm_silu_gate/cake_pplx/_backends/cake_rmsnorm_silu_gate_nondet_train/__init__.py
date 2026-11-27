@@ -270,23 +270,24 @@ measured point, in both runs, the forward was faster than 0.2.18's, no op
 gradient) was slower beyond noise and the forward was no slower than the
 deterministic package's.  The release measurement against 0.2.18 on the same
 GPUs (more forms and head counts; CUDA Graph replays, CUPTI, cold L2, four
-processes) then found an op slower than 0.2.18's beyond noise at some of
-those points, and 0.2.19 runs 0.2.18's programs there for every form of the
-class: whole-token rows of one head with ``z`` and ``dy`` sliced from a
-tensor four times the row width and packed ``x`` at 599.01, 600, 650 and 700
-rows per SM on B200 and GB300, padded rows of 4 heads at 599.03 on B200,
-``x`` broadcast over 16 heads at 999.03 and 1000 on B200, and head-major
-``x`` beside a sliced ``z`` of 2 heads at 1500 on GB300 and at 649.01, 650
-and 1000 on the VR200 node with driver 620.70.06 (the comments of the tables
-of ``cake_jit`` give the points, the forms and the times).  Where
-``fwd_layout_pipe`` runs in the place of the plain forward on sm_100a and
-sm_103a, ``y`` was the same bits where compared; in the place of the
-extra-long forward ``y`` can differ in the last bits of a few elements (the
-programs associate a row's sum of squares differently); on sm_107a, where
-``fwd_layout_pipe`` runs in the place of the plain forward, ``y`` differed
-from the plain forward's bits in every compared case, its accuracy against a
-float64 reference passed, and ``dx``, ``dz`` and the weight gradient were
-the same bits.  ``dx``, ``dz`` and the weight gradient do not change.
+processes) then found an op whose programs differ from 0.2.18's slower than
+0.2.18's beyond noise at some points of the moved bands, and 0.2.19 runs
+0.2.18's programs there for every form of the class: whole-token rows of one
+head with ``z`` and ``dy`` sliced from a tensor four times the row width and
+packed ``x`` at 599.01, 600, 650 and 700 rows per SM on B200 and GB300,
+padded rows of 4 heads at 599.03 on B200, ``x`` broadcast over 16 heads at
+999.03 and 1000 on B200, and head-major ``x`` beside a sliced ``z`` of 2
+heads at 1500 on GB300 and at 649.01, 650 and 1000 on the VR200 node with
+driver 620.70.06 (the comments of the tables of ``cake_jit`` give the
+points, the forms and the times).  Where ``fwd_layout_pipe`` runs in the
+place of the plain forward on sm_100a and sm_103a, ``y`` was the same bits
+where compared; in the place of the extra-long forward ``y`` can differ in
+the last bits of a few elements (the programs associate a row's sum of
+squares differently); on sm_107a, where ``fwd_layout_pipe`` runs in the
+place of the plain forward, ``y`` differed from the plain forward's bits in
+every compared case, its accuracy against a float64 reference passed, and
+``dx``, ``dz`` and the weight gradient were the same bits.  ``dx``, ``dz``
+and the weight gradient do not change.
 A band runs a
 backward whose weight gradient may vary only where the band-selection
 measurement found the checkpointed training step (2 x forward + backward)
