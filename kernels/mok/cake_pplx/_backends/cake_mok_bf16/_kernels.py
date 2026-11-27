@@ -387,6 +387,13 @@ def _fp32(value):
 # of tiny gates and ups is 0. At ``2^-119`` the reciprocal is at least about
 # ``2^-125.06``.
 SITU_BETA_LB_MIN = 2.0**-119
+# The smallest normal FP32 value. The SiTU-GLU kernels are built with
+# ``--use_fast_math`` (flush to zero): their ``-2.88539 / beta`` and
+# ``-2.88539 / lb`` (``div.rn.ftz``) read an FP32-subnormal ``beta`` or ``lb``
+# as 0 (an infinite quotient, as past the FP32 range), and give 0 for a
+# quotient under ``2^-126`` (``beta`` or ``lb`` above ``2.88539 * 2^126``,
+# about ``2.45e38``), which makes every hidden value 0.
+SITU_FP32_MIN_NORMAL = 2.0**-126
 
 
 def check_situ_parameters(situ_beta, situ_lb):
@@ -397,10 +404,15 @@ def check_situ_parameters(situ_beta, situ_lb):
     would be infinite in the kernels and give NaN), with ``beta lb`` finite in
     FP32 (above about ``2^129`` the kernels' ``kk``, about
     ``8.33 / (beta lb)``, is subnormal and gives an infinite or NaN hidden
-    value), and with ``beta lb`` at least :data:`SITU_BETA_LB_MIN`,
-    ``2^-119`` (about ``1.5e-36``; under about ``2^-119.94`` the kernels'
-    hidden value of tiny gates and ups would be 0). ``TypeError`` for another
-    type, ``ValueError`` for another value. Returns the FP32 values."""
+    value), with the FP32 values of ``beta`` and ``lb`` and the quotients
+    ``2.88539 / beta`` and ``2.88539 / lb`` at least
+    :data:`SITU_FP32_MIN_NORMAL`, ``2^-126`` (the kernels flush a subnormal
+    ``beta`` or ``lb`` to 0, and a subnormal quotient, from a ``beta`` or ``lb``
+    above about ``2.45e38``, to 0), and with ``beta lb`` at least
+    :data:`SITU_BETA_LB_MIN`, ``2^-119`` (about ``1.5e-36``; under about
+    ``2^-119.94`` the kernels' hidden value of tiny gates and ups would be 0).
+    ``TypeError`` for another type, ``ValueError`` for another value. Returns
+    the FP32 values."""
     for name, value in (("situ_beta", situ_beta), ("situ_lb", situ_lb)):
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise TypeError(
@@ -427,6 +439,23 @@ def check_situ_parameters(situ_beta, situ_lb):
             raise ValueError(
                 f"{name} is past the FP32 range (situ_beta {beta32!r}, situ_lb "
                 f"{lb32!r}): the kernels would give NaN"
+            )
+    # 2.88539 in FP32, the size of the kernels' numerator.
+    # ``SITU_FP32_MIN_NORMAL * value`` is exact in a Python float, so each
+    # comparison below is exact.
+    numerator = _fp32(2.88539)
+    for name, value in (("situ_beta", beta32), ("situ_lb", lb32)):
+        if value < SITU_FP32_MIN_NORMAL:
+            raise ValueError(
+                f"{name} is an FP32 subnormal value, under 2^-126, about "
+                f"1.18e-38 ({name} {value!r}): the kernels would read it as 0 "
+                "and give NaN"
+            )
+        if numerator < SITU_FP32_MIN_NORMAL * value:
+            raise ValueError(
+                f"2.88539 / {name} is under 2^-126 ({name} {value!r}, above "
+                "about 2.45e38): the kernels would flush it to 0 and give zero "
+                "hidden values"
             )
     # The product of two FP32 values is exact in a Python float.
     if beta32 * lb32 < SITU_BETA_LB_MIN:

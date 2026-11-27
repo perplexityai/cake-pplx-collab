@@ -3336,6 +3336,38 @@ def test_situ_parameters_refuse_a_product_under_the_bound():
         kernels.check_situ_parameters(1e-20, 1e-17)
 
 
+def test_situ_parameters_refuse_values_the_kernels_flush():
+    """Host only: the SiTU-GLU kernels are built with flush to zero, so their ``-2.88539 / beta`` and
+    ``-2.88539 / lb`` read an FP32-subnormal ``beta`` or ``lb`` as 0 and give 0 for a quotient under ``2^-126``
+    (``SITU_FP32_MIN_NORMAL``).  ``2^-126`` passes and the largest FP32 subnormal value and ``1e-38`` raise
+    ``ValueError``; ``2.88539 * 2^126`` in FP32 (quotient exactly ``2^-126``) passes and the next FP32 value raises.
+    The partner keeps ``beta * lb`` at least ``2^-119`` and finite in FP32."""
+    assert kernels.SITU_FP32_MIN_NORMAL == 2.0**-126
+    subnormal = "{} is an FP32 subnormal value, under 2\\^-126"
+    flushed = "2.88539 / {} is under 2\\^-126"
+    largest_subnormal = 2.0**-126 - 2.0**-149
+    assert kernels.check_situ_parameters(2.0**-126, 256.0) == (2.0**-126, 256.0)
+    assert kernels.check_situ_parameters(256.0, 2.0**-126) == (256.0, 2.0**-126)
+    for value in (largest_subnormal, 1e-38):
+        with pytest.raises(ValueError, match=subnormal.format("situ_beta")):
+            kernels.check_situ_parameters(value, 256.0)
+        with pytest.raises(ValueError, match=subnormal.format("situ_lb")):
+            kernels.check_situ_parameters(256.0, value)
+    numerator = float(torch.tensor(2.88539, dtype=torch.float32))
+    # Exact in FP32: an FP32 value times a power of two.
+    largest = numerator * 2.0**126
+    assert float(torch.tensor(largest, dtype=torch.float32)) == largest
+    # The next FP32 value: the spacing in [2^127, 2^128) is 2^104.
+    above = largest + 2.0**104
+    assert 2.0**127 <= largest < above < 2.0**128
+    assert kernels.check_situ_parameters(largest, 1.0) == (largest, 1.0)
+    assert kernels.check_situ_parameters(1.0, largest) == (1.0, largest)
+    with pytest.raises(ValueError, match=flushed.format("situ_beta")):
+        kernels.check_situ_parameters(above, 1.0)
+    with pytest.raises(ValueError, match=flushed.format("situ_lb")):
+        kernels.check_situ_parameters(1.0, above)
+
+
 #: The 896-expert top-16 group (``MODE_GROUPS["situ_top16"]``): SiTU-GLU routed experts without a shared expert.
 SITU_GROUP = kernels.MODE_GROUPS["situ_top16"]
 SITU_OK = dict(
@@ -3594,9 +3626,10 @@ def test_none_epilogues_take_no_shared_row(monkeypatch):
 
 def test_situ_call_refusals_come_before_device_work(monkeypatch):
     """Host only: an adapter of the 896-expert top-16 group refuses, before any copy, barrier or kernel load, a forward,
-    recompute or backward without ``situ_beta`` and ``situ_lb`` or with values that are not finite positive numbers, a
-    shared weight, a ``swiglu_limit``, a ``shared_scale`` and MXFP8 routed weights; a SwiGLU adapter refuses the
-    SiTU-GLU scalars."""
+    recompute or backward without ``situ_beta`` and ``situ_lb``, with values that are not finite positive numbers or
+    with values the kernels flush (an FP32-subnormal ``beta``, an ``lb`` whose quotient ``2.88539 / lb`` is under
+    ``2^-126``), a shared weight, a ``swiglu_limit``, a ``shared_scale`` and MXFP8 routed weights; a SwiGLU adapter
+    refuses the SiTU-GLU scalars."""
     functional = object.__new__(backend.MoKFunctional)
     functional.local_experts = 4
     functional._validated = {}
@@ -3642,6 +3675,10 @@ def test_situ_call_refusals_come_before_device_work(monkeypatch):
             run(situ_beta=4.0, situ_lb=torch.tensor(25.0))
         with pytest.raises(ValueError, match="situ_beta must be a finite positive float"):
             run(situ_beta=0.0, situ_lb=25.0)
+        with pytest.raises(ValueError, match="situ_beta is an FP32 subnormal value"):
+            run(situ_beta=1e-38, situ_lb=256.0)
+        with pytest.raises(ValueError, match="2.88539 / situ_lb is under 2\\^-126"):
+            run(situ_beta=1.0, situ_lb=3e38)
         with pytest.raises(ValueError, match="has no shared expert: pass None"):
             run(s=shared, **SITU)
         with pytest.raises(ValueError, match=r"runs SiTU-GLU \(situ_beta, situ_lb\): pass swiglu_limit=None"):
