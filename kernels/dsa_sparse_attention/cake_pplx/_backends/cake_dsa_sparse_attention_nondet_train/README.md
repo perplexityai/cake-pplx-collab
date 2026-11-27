@@ -875,11 +875,11 @@ The bridge runs the 64-head stages on two 64-head windows, `W1` first and then
   (`ValueError`; the NoPE query check names the rope form, the sink check
   says the sink form serves 64 query heads only).  The deterministic
   package's rope form serves 96 and 128 heads on `sm_100a` / `sm_103a` from
-  0.11.0, with its own builds.  An architecture outside
-  `cake_backend.HEAD_ARCHES` raises `NotImplementedError` for more than 64
-  heads before any kernel of the package launches (also without query rows,
-  on a CUDA tensor).  A prepared runner refuses `T = 0` with `ValueError` at
-  every head count.
+  0.11.0 and on `sm_107a` from 0.13.0, with its own builds.  An architecture
+  outside `cake_backend.HEAD_ARCHES` raises `NotImplementedError` for more
+  than 64 heads before any kernel of the package launches (also without
+  query rows, on a CUDA tensor).  A prepared runner refuses `T = 0` with
+  `ValueError` at every head count.
 * On `sm_107a` (from 0.12.0) the forward runs the single-pass forward and the
   backward the head-window main builds, with the `sm_107a` direct-accumulation
   rule and the single-pass descending token order of the 64-head plan and the

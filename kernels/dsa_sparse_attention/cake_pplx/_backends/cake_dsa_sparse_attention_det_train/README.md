@@ -463,7 +463,7 @@ or a compute capability 10.0 / 10.3 / 10.7 device),
 public entry points and the environment variables of the facade),
 `tests/experimental/test_cake_dsa_sparse_attention_det_train_heads.py` (96 and
 128 query heads: the host plans on the CPU, the naive tier and the bitwise
-repeats on `sm_100a` / `sm_103a`) and the
+repeats on `sm_100a` / `sm_103a` / `sm_107a`) and the
 CPU-only `tests/experimental/test_cake_dsa_sparse_attention_det_train_names.py`
 and `tests/experimental/test_cake_dsa_sparse_attention_det_train_standalone.py`.
 Accuracy is judged by `tests/cake_naive.py` through
