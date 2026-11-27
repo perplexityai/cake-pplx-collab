@@ -19313,6 +19313,502 @@ def test_device_one_pass_cuda_graph(glm_weight):
     contract_lm_head(dict(zip(names, captured)), new)
 
 
+def test_one_pass_layout_is_the_byte_slices_layout():
+    """:func:`cake_backend._one_pass_layout` gives the byte offsets and sizes the one-pass forward's kept block and
+    partials had as a list of aligned byte slices: the same block size, piece offsets, second-partials offset and
+    partial words, for both row counts, several vocabularies and forward CTA counts (``parts``), with and without
+    dX."""
+    H, align = cake_backend.ONE_PASS_HIDDEN, cake_backend._align
+    for T in (1, 2):
+        for V in (128, 4096, 151936, 154880):
+            for parts in (1, 132, 148, 160, 256):
+                for need_dx in (True, False):
+                    kept = [2 * T * V, 8 * T, 4 * T, 4, 8 * T]
+                    if need_dx:
+                        kept.append(4 * T * H)
+                    offsets, total = [], 0
+                    for nbytes in kept:
+                        offsets.append(total)
+                        total += align(nbytes)
+                    o_pu = align(8 * parts * T)
+                    words = (o_pu + (4 * parts * T * H if need_dx else 0)) // 4
+                    got = cake_backend._one_pass_layout(T, V, H, parts, need_dx)
+                    case = (T, V, parts, need_dx)
+                    assert got[0] == total and got[1:5] == tuple(offsets[1:5]), case
+                    assert not need_dx or got[5] == offsets[5], case
+                    assert got[6:] == (o_pu, words), case
+                    assert all(
+                        o % cake_backend.WORKSPACE_ALIGN == 0 for o in got[:7]
+                    ), case
+
+
+def test_one_pass_form_scalars_cover_the_plans_and_grids():
+    """Every one-pass stage's form scalars (:data:`cake_backend._ONE_PASS_FORM_SCALARS`) and its per-call scalars
+    cover the stage's arg-plan parameters (each per-call scalar is one), each form scalar is a parameter or a name its
+    grid rule reads, the grid rule reads form scalars only (never a per-call scalar), and a binding miss refuses a
+    call whose host values other than tensors differ from them (:func:`_one_pass_form_check`)."""
+    form = cake_backend._ONE_PASS_FORM_SCALARS
+    call = cake_backend.EAGER_CALL_SCALARS
+    names = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+    seen = set()
+    for name, record in cake_jit.MODULES.items():
+        for stage, scalars in form.items():
+            if stage not in record:
+                continue
+            seen.add(stage)
+            params = {n for kind, n in record[stage]["arg_plan"] if kind == "parameter"}
+            read = {
+                n
+                for term in record[stage].get("grid", ["rows_c", 1, 1])
+                for n in names.findall(str(term))
+                if n not in ("min", "max", "sms")
+            }
+            slots = set(call.get(stage, ()))
+            # every parameter keyed or slotted, every key read, the grid reading keys only
+            assert params <= set(scalars) | slots and slots <= params, (name, stage)
+            assert set(scalars) <= params | read, (name, stage)
+            assert read <= set(scalars), (name, stage, read)
+    assert seen == set(form)
+    t = torch.empty(1)
+    dw = {
+        "Z": t,
+        "ROWS": t,
+        "LAB": t,
+        "X": t,
+        "DXA": t,
+        "grad": t,
+        "DW": t,
+        "DX": t,
+    }
+    dw.update(V=128, T=1, ldx=6144, dw_blocks=4, dx_blocks=3)
+    cake_backend._one_pass_form_check(cake_backend.ONE_PASS_DW_STAGE, dw)
+    merge = {
+        "PU": t,
+        "PMS": t,
+        "W": t,
+        "Z": t,
+        "labels": t,
+        "DXA": t,
+        "ROWS": t,
+        "LOGP": t,
+        "LOSS": t,
+        "LAB": t,
+    }
+    merge.update(parts=1, T=1, V=128, H=6144, with_u=1, loss_div=1.0)
+    cake_backend._one_pass_form_check(cake_backend.ONE_PASS_COMBINE_STAGE, merge)
+    for stage, values, change in (
+        (cake_backend.ONE_PASS_DW_STAGE, dw, {"rows_c": 2}),
+        (cake_backend.ONE_PASS_DW_STAGE, dw, {"ldx": t}),
+        (cake_backend.ONE_PASS_DW_STAGE, dw, {"DX": None}),
+        (cake_backend.ONE_PASS_COMBINE_STAGE, merge, {"loss_div": t}),
+    ):
+        with pytest.raises(RuntimeError, match="one-pass stage"):
+            cake_backend._one_pass_form_check(stage, {**values, **change})
+    without = {k: v for k, v in merge.items() if k != "loss_div"}
+    with pytest.raises(RuntimeError, match="one-pass stage"):
+        cake_backend._one_pass_form_check(cake_backend.ONE_PASS_COMBINE_STAGE, without)
+
+
+@pytest.mark.parametrize("T", [1, 2])
+def test_device_one_pass_formed_keys_match_eager_form(monkeypatch, glm_weight, T):
+    """A one-pass launch keys its remembered launch itself (``_EAGER_FORMED`` and the stage's form scalars): over the
+    trainable sets, two loss divisors and (2 rows) a padded ``X`` pitch, two launches share a formed key exactly when
+    :func:`_eager_form` over their full host values is the same, so the cache keeps one launch per form (the merge's
+    ``loss_div`` a per-call slot: one binding for both divisors); a repeated round binds nothing, and every output is
+    bitwise the output with the binding cache disabled."""
+    _require_one_pass(T)
+    calls, binds = [], []
+    real_launch, real_bind = cake_backend._one_pass_launch, cake_backend._bind_all
+
+    def launch(module_name, record, stage, values, device, index):
+        calls.append((module_name, stage, index, dict(values)))
+        return real_launch(module_name, record, stage, values, device, index)
+
+    def bind(record, module_name, keys, *args, **kwargs):
+        binds.append(tuple(key[0] for key in keys))
+        return real_bind(record, module_name, keys, *args, **kwargs)
+
+    monkeypatch.setattr(cake_backend, "_one_pass_launch", launch)
+    monkeypatch.setattr(cake_backend, "_bind_all", bind)
+    cache = cake_backend.BindingCache()
+    monkeypatch.setattr(cake_backend, "BINDING_CACHE", cache)
+    inp = _device_inputs(T, "ce", W=glm_weight, ignore_frac=0.0)
+    draws = [inp, dataclasses.replace(inp, loss_div=3.0 * inp.loss_div)]
+    if T > 1:
+        draws.append(dataclasses.replace(inp, X=_padded_rows(inp.X)))
+    cases = [
+        (draw, tx, tw)
+        for draw in draws
+        for tx, tw in ((True, True), (True, False), (False, True))
+    ]
+
+    def run():
+        out = [
+            _run(d, 4096, backend="cake", train_x=tx, train_w=tw) for d, tx, tw in cases
+        ]
+        torch.cuda.synchronize()
+        return out
+
+    with _one_pass_rows({T}):
+        cache.configure(enabled=False)
+        fresh = run()
+        cache.configure(enabled=True)
+        calls.clear()
+        binds.clear()
+        first = run()
+        formed = [
+            (
+                cake_backend._EAGER_FORMED,
+                name,
+                stage,
+                index,
+                cake_backend._ONE_PASS_FORM_OF[stage](values),
+            )
+            for name, stage, index, values in calls
+        ]
+        generic = [
+            cake_backend._eager_form(
+                name, stage, f"cuda:{index}", {**cake_backend._EAGER_BASE, **values}
+            )
+            for name, stage, index, values in calls
+        ]
+        for i in range(len(calls)):
+            for j in range(len(calls)):
+                assert (formed[i] == formed[j]) == (generic[i] == generic[j]), (
+                    calls[i][1],
+                    calls[j][1],
+                )
+        assert len(binds) == len(set(formed)) == len(cache._eager)
+        assert set(cache._eager) == set(formed)
+        binds.clear()
+        again = run()
+        assert binds == []
+    for case, a, b, c in zip(cases, fresh, first, again, strict=True):
+        for key in ("loss", "logp", "dX", "dW"):
+            assert _same_bits(a[key], b[key]) and _same_bits(a[key], c[key]), (
+                case[1:],
+                key,
+            )
+
+
+@pytest.mark.parametrize("T", [1, 2])
+def test_device_one_pass_views_are_the_byte_slices(glm_weight, T):
+    """The one-pass forward's kept views (logits, row results, ``logp``, loss, labels, dX accumulator) are the views
+    the aligned byte slices of its uint8 block and their dtype views are: the same address, shape, stride and dtype,
+    all in the one storage of the block, with and without dX."""
+    _require_one_pass(T)
+    inp = _device_inputs(T, "ce", W=glm_weight, ignore_frac=0.0)
+    H, V = int(inp.X.shape[1]), int(inp.W.shape[0])
+    f32 = torch.float32
+    for need_dx in (True, False):
+        with torch.no_grad():
+            fr = cake_backend._one_pass_forward(
+                inp.X,
+                inp.W,
+                inp.labels,
+                loss_div=inp.loss_div,
+                chunk_size=4096,
+                need_dx=need_dx,
+                need_dw=True,
+            )
+        Z, ROWS, LAB, DXA = fr.one_pass[:4]
+        storage = Z.untyped_storage()
+        block = torch.empty(0, dtype=torch.uint8, device=Z.device).set_(storage)
+        assert Z.data_ptr() == block.data_ptr()
+        pieces = [
+            (2 * T * V, torch.bfloat16, Z),
+            (8 * T, f32, ROWS),
+            (4 * T, f32, fr.logp),
+            (4, f32, fr.loss),
+            (8 * T, torch.int64, LAB),
+        ]
+        if need_dx:
+            pieces.append((4 * T * H, f32, DXA))
+        else:
+            assert DXA is None and fr.dx_acc is None
+        offset = 0
+        for nbytes, dtype, got in pieces:
+            want = block[offset : offset + nbytes].view(dtype)
+            if got is fr.loss:
+                want = want.view(())
+            assert (got.data_ptr(), got.shape, got.stride(), got.dtype) == (
+                want.data_ptr(),
+                want.shape,
+                want.stride(),
+                want.dtype,
+            ), (need_dx, nbytes)
+            assert got.untyped_storage().data_ptr() == storage.data_ptr()
+            offset += cake_backend._align(nbytes)
+        assert storage.nbytes() == offset
+        torch.cuda.synchronize()
+
+
+def test_device_one_pass_checks_loss_div_on_every_call(monkeypatch, glm_weight):
+    """While the binding cache is enabled a one-pass call validates its inputs once per (device, V, chunk size)
+    (``_ONE_PASS_VALID``) and its ``loss_div`` on every call: each bad divisor raises the same error before and after
+    the key's first valid call, and a later valid call runs no validation.  With the cache disabled every call
+    validates and no key is added."""
+    _require_one_pass(1)
+    inp = _device_inputs(1, "ce", W=glm_weight, ignore_frac=0.0)
+    cache = cake_backend.BindingCache()
+    monkeypatch.setattr(cake_backend, "BINDING_CACHE", cache)
+    keys = set()
+    monkeypatch.setattr(cake_backend, "_ONE_PASS_VALID", keys)
+    validated = []
+    real = cake_backend.validate_lm_head_inputs
+
+    def counting(*args, **kwargs):
+        validated.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(cake_backend, "validate_lm_head_inputs", counting)
+    X = inp.X.detach().requires_grad_(True)
+    W = inp.W.detach().requires_grad_(True)
+    bad = [
+        None,
+        0,
+        -1.0,
+        float("nan"),
+        float("inf"),
+        True,
+        "1",
+        torch.tensor([1.0, 2.0]),
+        torch.tensor(1.0, device=CUDA),
+    ]
+
+    def call(loss_div):
+        return cake_backend.cake_lm_head_nondet_train_loss(
+            X, W, inp.labels, loss_div=loss_div, chunk_size=4096
+        )
+
+    def errors():
+        out = []
+        for value in bad:
+            with pytest.raises(ValueError) as info:
+                call(value)
+            out.append(str(info.value))
+        return out
+
+    with _one_pass_rows({1}):
+        cold = errors()
+        assert len(validated) == len(bad)
+        call(inp.loss_div).backward()
+        assert len(validated) == len(bad) + 1
+        validated.clear()
+        warm = errors()
+        call(inp.loss_div).backward()
+        assert validated == []
+        assert len(keys) == 1
+        cache.configure(enabled=False)
+        keys.clear()
+        for _ in range(2):
+            call(inp.loss_div).backward()
+        assert len(validated) == 2 and not keys
+        validated.clear()
+        assert errors() == cold
+        assert len(validated) == len(bad)
+    torch.cuda.synchronize()
+    assert warm == cold
+
+
+# The hooked and checkpointed forms of a one-pass step (:func:`_one_pass_hooked_step`)
+ONE_PASS_HOOKED_KINDS = (
+    "offload",
+    "checkpoint_forward",
+    "checkpoint_deterministic",
+    "selective",
+    "selective_forward",
+    "reentrant",
+)
+
+
+@contextlib.contextmanager
+def _one_pass_routes():
+    """The routes of the block's one-pass calls, in order: the ``checked`` flag of every
+    :func:`cake_backend._one_pass_forward` call (``True``: the autograd forward's direct call, ``False``: through
+    :func:`cake_backend._loss_forward`) and the ``ldx`` (the row pitch of ``X``) of every ``one_pass_dw`` launch."""
+    checked: list = []
+    ldx: list = []
+    forward, launch = cake_backend._one_pass_forward, cake_backend._one_pass_launch
+
+    def recording_forward(*args, **kwargs):
+        checked.append(bool(kwargs.get("checked", False)))
+        return forward(*args, **kwargs)
+
+    def recording_launch(module_name, record, stage, values, device, index):
+        if stage == cake_backend.ONE_PASS_DW_STAGE:
+            ldx.append(values["ldx"])
+        return launch(module_name, record, stage, values, device, index)
+
+    cake_backend._one_pass_forward = recording_forward
+    cake_backend._one_pass_launch = recording_launch
+    try:
+        yield checked, ldx
+    finally:
+        cake_backend._one_pass_forward, cake_backend._one_pass_launch = forward, launch
+
+
+def _one_pass_hooked_step(inp, kind):
+    """One step of the loss entry (``return_logp=True``, ``X`` and ``W`` trainable, then the backward) under ``kind``:
+    ``plain`` (no hooks); ``offload`` (:func:`_offload_hooks` on top: the backward unpacks a contiguous copy of ``X``);
+    ``checkpoint_forward`` / ``checkpoint_deterministic``: a non-reentrant checkpoint under the gradient placement
+    ``"forward"`` / torch's deterministic algorithms (both passes form the gradients); ``selective`` /
+    ``selective_forward``: a selective activation checkpoint that recomputes every operator, under the placement
+    ``"auto"`` / ``"forward"``; ``reentrant``: a reentrant checkpoint.  Returns ``loss`` / ``logp`` (the first pass's)
+    / ``dX`` / ``dW``, the one-pass stages launched, in order, the routes (:func:`_one_pass_routes`) and the storages
+    the offload hooks packed."""
+    X = inp.X.detach().requires_grad_(True)
+    W = inp.W.detach().requires_grad_(True)
+    logps, packed = [], []
+
+    def head(a, b):
+        loss, logp = cake_backend.cake_lm_head_nondet_train_loss(
+            a, b, inp.labels, loss_div=inp.loss_div, chunk_size=4096, return_logp=True
+        )
+        logps.append(logp)
+        return loss
+
+    with contextlib.ExitStack() as stack:
+        if kind in ("checkpoint_forward", "selective_forward"):
+            stack.enter_context(_placement("forward"))
+        if kind == "checkpoint_deterministic":
+            stack.enter_context(_torch_deterministic(True))
+        launched = stack.enter_context(_one_pass_launches())
+        routes = stack.enter_context(_one_pass_routes())
+        if kind == "plain":
+            loss = head(X, W)
+        elif kind == "offload":
+            with _offload_hooks(packed):
+                loss = head(X, W)
+        elif kind in ("checkpoint_forward", "checkpoint_deterministic"):
+            loss = _checkpointed("nonreentrant", head, X, W)
+        elif kind in ("selective", "selective_forward"):
+            loss = _checkpointed("selective_recompute", head, X, W)
+        else:
+            loss = _checkpointed(kind, head, X, W)
+        loss.backward()
+        torch.cuda.synchronize()
+    out = {
+        "loss": loss.detach(),
+        "logp": logps[0].detach(),
+        "dX": X.grad,
+        "dW": W.grad,
+    }
+    return out, launched, routes, packed
+
+
+@pytest.mark.parametrize("kind", ONE_PASS_HOOKED_KINDS)
+@pytest.mark.parametrize("T", [1, 2])
+def test_device_one_pass_hooked_steps_match_the_plain_step(glm_weight, T, kind):
+    """A one-pass step under saved-tensor hooks or a checkpoint (:func:`_one_pass_hooked_step`; 2 rows: ``X`` at a
+    padded pitch, which the offload hooks give back contiguous, so that backward's ``one_pass_dw`` reads ``X`` at
+    pitch ``H`` where the plain step's reads it at ``H + 64``) gives the plain step's ``loss``, ``logp``, ``dX`` and
+    ``dW`` bit for bit.  Outside the split checkpoint path a pass takes the entry's own one-pass answer straight to
+    the one-pass forward (``checked``, :func:`_one_pass_routes`): the offload hooks run the plain step's three
+    launches; a non-reentrant checkpoint under the placement ``"forward"`` or torch's deterministic algorithms (a
+    selective one under ``"forward"`` too) runs the full forward and the merge in both passes, then the backward.  A
+    pass that leaves the gradients to the recomputation runs the forward without the head-row sums first: a selective
+    checkpoint under ``"auto"`` (the split path: both passes through :func:`cake_backend._loss_forward`) and the
+    reentrant checkpoint (its first pass, without a graph, through ``_loss_forward``; its recomputation straight)."""
+    _require_one_pass(T)
+    inp = _device_inputs(T, "ce", W=glm_weight, ignore_frac=0.0)
+    H = int(inp.X.shape[1])
+    if T > 1:
+        inp = dataclasses.replace(inp, X=_padded_rows(inp.X))
+        assert inp.X.stride(0) == H + 64
+    with _one_pass_rows({T}):
+        plain, plain_launched, plain_routes, _ = _one_pass_hooked_step(inp, "plain")
+        got, launched, (checked, ldx), packed = _one_pass_hooked_step(inp, kind)
+    fwd, fwd_nodx = cake_backend.ONE_PASS_FWD_STAGES[T]
+    combine, dw = cake_backend.ONE_PASS_COMBINE_STAGE, cake_backend.ONE_PASS_DW_STAGE
+    assert plain_launched == [fwd, combine, dw]
+    # the plain step's dW launch reads X at its own pitch
+    assert plain_routes == ([True], [H + 64 if T > 1 else H]), plain_routes
+    if kind == "offload":
+        assert packed, "the offload hooks packed no tensor"
+        # the backward unpacks a contiguous copy of X
+        assert ldx == [H], ldx
+        want, direct = [fwd, combine, dw], [True]
+    elif kind == "selective":
+        want, direct = [fwd_nodx, combine, fwd, combine, dw], [False, False]
+    elif kind == "reentrant":
+        want, direct = [fwd_nodx, combine, fwd, combine, dw], [False, True]
+    else:
+        want, direct = [fwd, combine, fwd, combine, dw], [True, True]
+    assert launched == want, (kind, launched)
+    assert checked == direct, (kind, checked)
+    _assert_step_bits(got, plain)
+
+
+def test_device_one_pass_on_a_non_current_device(monkeypatch, glm_weight):
+    """A one-pass call whose ``X``, ``W`` and ``labels`` are on ``cuda:1`` while the current device is 0 launches with
+    device index 1: next to the same call on device 0, each one-pass form binds once per device (the remembered forms
+    keyed by index 0 and 1), a repeated round binds nothing, the current device stays 0, and every output is bitwise
+    the output with the binding cache disabled."""
+    _require_one_pass(1)
+    if torch.cuda.device_count() < 2:
+        pytest.skip("requires two CUDA devices")
+    for index in (0, 1):
+        if (
+            not cake_backend.generated_program_available(
+                torch.device("cuda", index), entry="loss"
+            )
+            or 1 not in cake_backend._one_pass_record(index)[2]
+        ):
+            pytest.skip(f"device {index} registers no one-pass programs of 1 row")
+    calls, binds = [], []
+    real_launch, real_bind = cake_backend._one_pass_launch, cake_backend._bind_all
+
+    def launch(module_name, record, stage, values, device, index):
+        calls.append((stage, index, device))
+        return real_launch(module_name, record, stage, values, device, index)
+
+    def bind(record, module_name, keys, values, device, geometry):
+        binds.append((keys[0][0], torch.device(device).index))
+        return real_bind(record, module_name, keys, values, device, geometry)
+
+    monkeypatch.setattr(cake_backend, "_one_pass_launch", launch)
+    monkeypatch.setattr(cake_backend, "_bind_all", bind)
+    cache = cake_backend.BindingCache()
+    monkeypatch.setattr(cake_backend, "BINDING_CACHE", cache)
+    zero, one = torch.device("cuda", 0), torch.device("cuda", 1)
+    inp = _device_inputs(1, "ce", W=glm_weight, ignore_frac=0.0)
+    near, far = (
+        dataclasses.replace(
+            inp, X=inp.X.to(dev), W=inp.W.to(dev), labels=inp.labels.to(dev)
+        )
+        for dev in (zero, one)
+    )
+    stages = _one_pass_stages(1)
+
+    def run():
+        out = [_run(draw, 4096, backend="cake") for draw in (far, near)]
+        torch.cuda.synchronize(one)
+        torch.cuda.synchronize(zero)
+        return out
+
+    with torch.cuda.device(zero), _one_pass_rows({1}):
+        cache.configure(enabled=False)
+        fresh = run()
+        cache.configure(enabled=True)
+        calls.clear()
+        binds.clear()
+        first = run()
+        assert torch.cuda.current_device() == 0
+        assert calls == [(s, 1, one) for s in stages] + [(s, 0, zero) for s in stages]
+        assert sorted(binds) == sorted((s, i) for s in stages for i in (0, 1))
+        assert sorted((form[2], form[3]) for form in cache._eager) == sorted(binds)
+        binds.clear()
+        again = run()
+        assert binds == []
+        assert torch.cuda.current_device() == 0
+    for a, b, c in zip(fresh, first, again, strict=True):
+        for key in ("loss", "logp", "dX", "dW"):
+            assert _same_bits(a[key], b[key]) and _same_bits(a[key], c[key]), key
+    for out in (first[0], again[0]):
+        assert all(out[key].device == one for key in ("loss", "logp", "dX", "dW"))
+
+
 def test_cast_fold_plan_keys():
     """The label residual fold in the compact dX cast (:func:`cake_backend.cast_fold_rows`, :attr:`Plan.cast_fold`): a
     compacted plan under the fused dX finalize whose dX the scatter cast finalizes (a loss plan, or a log-probability
@@ -20902,7 +21398,10 @@ def test_cast_fold_programs_are_registered():
         ]
         for stage in (scatter_fold, flat_fold):
             assert record[stage]["launch"] == record["scale_cast_bf16"]["launch"]
-    assert cake_backend.EAGER_CALL_SCALARS == {scatter_fold: ("fold_lo", "fold_hi")}
+    assert cake_backend.EAGER_CALL_SCALARS == {
+        scatter_fold: ("fold_lo", "fold_hi"),
+        cake_backend.ONE_PASS_COMBINE_STAGE: ("loss_div",),
+    }
     tensors = cake_backend.STAGE_TENSORS
     assert tensors["scale_cast_scatter_bf16"] == ("acc", "g", "scan", "idx_lo", "out")
     assert tensors[scatter_fold] == tensors["scale_cast_scatter_bf16"] + (
