@@ -231,6 +231,8 @@ kernel_cake_mhc_det_train_bwd_slab__xrsg_p160__h7168(const __grid_constant__ CUt
     const int dy0_addr_1_3 = smem + 58368;
     __nv_bfloat16* dus = reinterpret_cast<__nv_bfloat16*>(smem_raw + 66560);
     const int dus_addr = smem + 66560;
+    uint8_t* ep_tiles = reinterpret_cast<uint8_t*>(smem_raw + 1024);
+    const int ep_tiles_addr = smem + 1024;
     __nv_bfloat16* dz0_1_0 = reinterpret_cast<__nv_bfloat16*>(smem_raw + 74752);
     const int dz0_addr_1_0 = smem + 74752;
     __nv_bfloat16* dz0_1_1 = reinterpret_cast<__nv_bfloat16*>(smem_raw + 78848);
@@ -1046,7 +1048,7 @@ kernel_cake_mhc_det_train_bwd_slab__xrsg_p160__h7168(const __grid_constant__ CUt
                     mbarrier_wait(acc_full_addr + (acc_ep) * 8, _phase_acc_full);
                     asm volatile("tcgen05.fence::after_thread_sync;");
                     unsigned int tm = lane_tm + acc_ep * 64;
-                    unsigned int tab = dz0_addr_1_0 + ep_stage * 86016;
+                    unsigned int tab = ep_tiles_addr + 73728 + ep_stage * 86016;
                     unsigned int tmc = acc_ep * 128;
                     float tmem_load[16];
                     asm volatile(
@@ -1065,7 +1067,7 @@ kernel_cake_mhc_det_train_bwd_slab__xrsg_p160__h7168(const __grid_constant__ CUt
                     asm volatile("cp.async.wait_group 0;");
                     __syncwarp();
                     asm volatile("tcgen05.fence::after_thread_sync;");
-                    unsigned int sbase = x0_addr_1_0 + ep_stage * 86016;
+                    unsigned int sbase = ep_tiles_addr + ep_stage * 86016;
                     unsigned int tv[24];
                     unsigned int wpp[2];
                     unsigned int wrow = wtab + (unsigned int)(tq * 64);

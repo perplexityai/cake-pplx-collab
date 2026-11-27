@@ -188,6 +188,15 @@ T_ACCURACY_CELL = {5120: (8000, 8064, 8065, 9280, 9281), 7168: (13568, 13569)}
 # 7168 and 147456 tokens it runs out of the 278.5 GiB of one R200 device).
 T_ACCURACY_CELL_CAP = (131072, 131073)
 R200_CELL_CAP_BOARD = ("sm_107a", 212, 7168)
+# Both sides of band edges of the draw cells (BWD_SLAB_DRAW_OVERRIDES) and the chain cells (FN_SPLIT_CHAIN_OVERRIDES),
+# judged on every device (where a board has no cell its records of record run): at 4096 the B200 (148 SMs) draw edges
+# 1664 / 1665, 2048 / 2049 and 5248 / 5249 and the GB300 (152 SMs) edge 1920 / 1921, at 7168 the B200 edge 1024 / 1025
+# and the GB300 edge 576 / 577, and the B200 chain edges 1664 / 1665 and 1728 / 1729 at 4096 and 4096 / 4097 at both
+# sizes (the token counts T_ACCURACY / T_ACCURACY_NEW already judge at the size are not repeated).
+T_ACCURACY_DRAW = {
+    4096: (1664, 1665, 1728, 1729, 1920, 1921, 2048, 4097, 5248, 5249),
+    7168: (576, 577, 1024, 1025, 4097),
+}
 # The 19 benchmark token counts of the performance tables.
 T_BENCH = (1024, 1536, 2048, 2304, 2560, 3072, 3584, 4096, 8192, 14928, 15288, 15566, 15590, 16114, 16132, 16164,
            16263, 32768, 65536)  # fmt: skip
@@ -205,6 +214,10 @@ LPT_OS = "cake_mhc_train_bwd_slab_fold__lpt_os"
 # SM107 outside torch.use_deterministic_algorithms(True)).
 RED = "cake_mhc_train_bwd_slab_red__dynr"
 RED_OS = "cake_mhc_train_bwd_slab_red__dynr_os"
+# The late-draw copies of dynr / dynr_os (program keys ``dynr_late`` / ``dynr_os_late``;
+# cake_jit.BWD_SLAB_DRAW_OVERRIDES).
+SLAB_LATE = "cake_mhc_train_bwd_slab_fold__dynr_late"
+SLAB_OS_LATE = "cake_mhc_train_bwd_slab_fold__dynr_os_late"
 # The column-slab record of each program key (the size suffix appended at 5120 and 7168).
 SLAB_RECORDS = {
     "dynr": SLAB,
@@ -213,6 +226,8 @@ SLAB_RECORDS = {
     "lpt_os": LPT_OS,
     "dynr_red": RED,
     "dynr_os_red": RED_OS,
+    "dynr_late": SLAB_LATE,
+    "dynr_os_late": SLAB_OS_LATE,
 }
 # The lpt record's chunk scalars (cake_jit.slab_plan), in kernel-parameter order (P, rpc, p_big, rpc_small).
 LPT_HOST_KEYS = (
@@ -681,6 +696,24 @@ def test_nondeterministic_backward_matches_fp64(
     )
 
 
+@pytest.mark.parametrize(
+    ("hidden", "T"),
+    [pytest.param(h, T, id=f"H{h}-{T}") for h, Ts in T_ACCURACY_DRAW.items() for T in Ts],
+)
+def test_draw_and_chain_cell_edges_match_fp64(
+    hidden: int, T: int, record_property
+) -> None:
+    """Both sides of the band edges of the draw and chain cells (:data:`T_ACCURACY_DRAW`), judged as
+    :func:`test_nondeterministic_backward_matches_fp64` judges each case: on B200 (148 SMs) and GB300 (152 SMs) the
+    late-draw column slab on one side of a draw edge and the fold's draw on the other, and on B200 the ``"dep1"`` fn
+    split to 4096 tokens (at 4096 but from 1665 to 1728) and the ``"dep"`` one elsewhere; every other device runs its
+    records of record."""
+    _require_hidden(hidden)
+    _judge_nd(
+        lambda s: _make_inputs(T, hidden=hidden, seed=s), record_property, seed=SEED
+    )
+
+
 @pytest.mark.parametrize("T", T_ACCURACY_CELL_CAP)
 def test_r200_cell_cap_matches_fp64(T: int, record_property) -> None:
     """Both sides of the last band edge of the R200 board's (212 SMs) order cell at 7168 (the slab order to 131072
@@ -994,9 +1027,10 @@ def test_launches_are_this_packages_records(monkeypatch, hidden: int) -> None:
     autograd connection with the statistics saved and replayed, a run-time Sinkhorn count) is one of this package's
     records for the local architecture and the call's hidden size, and the deterministic package launches nothing
     (its launch paths refuse); ``backward_finish`` loads exactly its ``bwd_finish`` selection, in launch order: one
-    token-owner record, the atomic fn split of the architecture and size and the column slab's form of the call
-    (``bwd_slab_atomic_program``: the size's ``dynr``, ``lpt``, ``dynr_os`` or ``lpt_os`` record, on SM107 the
-    reduction form ``dynr_red`` / ``dynr_os_red``)."""
+    token-owner record, the atomic fn split of the architecture and size (its ``"dep1"`` copy where
+    ``fn_split_bwd_program`` names it) and the column slab's form of the call (``bwd_slab_atomic_program``: the
+    size's ``dynr``, ``lpt``, ``dynr_os`` or ``lpt_os`` record, the late-draw copy of a fold, on SM107 the reduction
+    form ``dynr_red`` / ``dynr_os_red``)."""
     _require_hidden(hidden)
 
     def refuse(*_args, **_kwargs):
@@ -1025,7 +1059,11 @@ def test_launches_are_this_packages_records(monkeypatch, hidden: int) -> None:
     selection = loader.selected_modules(arch, hidden, "bwd_finish", rows=T, sm_count=sm)
     assert [name for name, _ in loaded[start:]] == list(selection), loaded[start:]
     assert loader.MODULES[selection[0]]["role"] == "bwd_token", selection
-    chain = "dep1" if (arch, hidden) == ("sm_107a", 4096) else "dep"
+    chain = (
+        "dep1"
+        if (arch, hidden) == ("sm_107a", 4096)
+        else loader.fn_split_bwd_program(T, sm, arch, hidden)
+    )
     assert selection[1] == (
         f"cake_mhc_train_fn_split_atomic__{loader.fn_split_program(arch, 1, hidden)}_{chain}"
         + _suffix(hidden)
@@ -1059,8 +1097,9 @@ def test_deterministic_algorithms_launch_the_fold(
     deterministic_algorithms, monkeypatch, hidden: int
 ) -> None:
     """The column slab's form follows PyTorch's deterministic algorithms call by call, by launch trace (every FFI
-    entry the route plans call is recorded under its record's name; fresh plan caches).  At 2049, 16263 and 40960
-    tokens (40960: a "slab" band of the R200 board's cell at every hidden size),
+    entry the route plans call is recorded under its record's name; fresh plan caches).  At 576, 1152, 2049, 16263
+    and 40960 tokens (40960: a "slab" band of the R200 board's cell at every hidden size; 576 and 1152: "late" bands of
+    the B200 and GB300 draw cells at 4096, 576 at 7168 too),
     ``backward_finish`` with the mode off launches its ``bwd_finish`` selection of record -- the token-owner record,
     the atomic fn split and the column slab's record (``bwd_slab_atomic_program``; on an architecture whose
     ``BWD_SLAB_DFN`` form is ``"red"``, SM107, the reduction form ``cake_mhc_train_bwd_slab_red__*``) -- and under
@@ -1096,7 +1135,7 @@ def test_deterministic_algorithms_launch_the_fold(
     monkeypatch.setattr(
         loader, "load", lambda name, record_arch: _Traced(name, load(name, record_arch))
     )
-    for T in (2049, 16263, 40960):
+    for T in (576, 1152, 2049, 16263, 40960):
         i = _make_inputs(T, hidden=hidden, seed=SEED + 90)
         prep = _forward(i)
         ws = pkg.cake_mhc_nondet_train_backward_workspace(T, _device(), hidden=hidden)
@@ -1323,10 +1362,14 @@ def test_policy_prepare_node_runs_its_backward(
 # accumulate
 
 
-@pytest.mark.parametrize(("hidden", "T"), _hidden_cases((1000, 4096), (4096, 40960)))
+@pytest.mark.parametrize(
+    ("hidden", "T"), _hidden_cases((1000, 1152, 4096), (576, 4096, 40960))
+)
 def test_accumulate_four_times(hidden: int, T: int, record_property) -> None:
     """Four consecutive ``accumulate=True`` passes on four input sets into caller buffers that start from non-zero
-    values (at 5120 and 7168 also at 40960 tokens, a "slab" band of the R200 board's cell at both sizes): the returned
+    values (at 5120 and 7168 also at 40960 tokens, a "slab" band of the R200 board's cell at both sizes; at 4096 also
+    at 1152 and at 5120 / 7168 at 576 tokens, a "late" band of the B200 and GB300 draw cells and a "dep1" band of the
+    B200 chain cells at 4096 / 7168): the returned
     tensors are the caller's buffers; ``dfn``, ``dscale``, ``dbase`` after the four passes are
     judged against the naive BF16 tier over 32 draws of the four-fold chain (the oracle: the carried-in values plus
     the four FP64 gradients; the tier: the carried-in values in BF16 plus the four BF16 gradients, added in BF16)."""

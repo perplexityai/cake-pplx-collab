@@ -40,6 +40,13 @@ deterministic registry's records, routes and record scalars of this package's
   ``cake_mhc_train_bwd_slab_fold__dynr__h<H>`` and
   ``cake_mhc_train_bwd_slab_fold__dynr_os__h<H>`` on all three (no
   two-size record, ``lpt`` / ``lpt_os``: no two-size calibration of record); the
+  late-draw copies of the fold (``BWD_SLAB_DRAW_OVERRIDES``: program key
+  ``<program>_late``) ``cake_mhc_train_bwd_slab_fold__dynr_late`` (sm_100a,
+  sm_103a), ``cake_mhc_train_bwd_slab_fold__dynr_os_late`` (sm_100a) and
+  ``cake_mhc_train_bwd_slab_fold__dynr_late__h7168`` (sm_100a, sm_103a), and
+  the ``"dep1"`` fn splits of sm_100a ``cake_mhc_train_fn_split_atomic__tv128_dep1``
+  and ``__tv128_dep1__h7168`` (``FN_SPLIT_CHAIN_OVERRIDES``: each split of a form
+  that ships in both chains selects its chain by ``fn_split_bwd_program``); the
   two-word column slab ``cake_mhc_train_bwd_slab_fold__dynr_pair`` (hidden 4096,
   all three; in no route: only ``accumulation="fp32x2"`` selects it, beside the
   copied two-word records of the mapping pass and the token owner); on sm_107a
@@ -89,8 +96,14 @@ deterministic registry's records, routes and record scalars of this package's
   ``prow``, ``param_rows`` and ``slot_parts``), but this package's own
   column-slab rule (``BWD_SLAB_LPT``, ``BWD_SLAB_LPT_HIDDEN``,
   ``BWD_SLAB_ORDER``, ``BWD_SLAB_ORDER_OVERRIDES``, ``BWD_SLAB_LPT_OVERRIDES``,
-  ``lpt_chunks``, ``bwd_slab_order``, ``bwd_slab_atomic_program``,
-  ``slab_plan``): its geometries, its token-count bands (the unit order of
+  ``BWD_SLAB_DRAW_OVERRIDES``, ``lpt_chunks``, ``bwd_slab_order``,
+  ``bwd_slab_draw``, ``bwd_slab_atomic_program``, ``slab_plan``) and fn split
+  rule (``FN_SPLIT_CHAIN_OVERRIDES``, ``fn_split_bwd_program``): the draw
+  cells of B200 (148 SMs) and GB300 (152 SMs) at 4096 and 7168, whose ``"late"``
+  bands are the 64-token tiles where ``k7_chunks`` gives at most one unit per SM,
+  and the chain cells of B200 at 4096 and 7168 (``"dep1"`` to 4096 tokens, at
+  4096 but from 1665 to 1728), each
+  changing the selection of its own board alone; its geometries, its token-count bands (the unit order of
   record, and the banded calibration form under a test table), its board cells
   (those of record: the order cells of sm_107a with 212 SMs at every hidden
   size, whose ``"slab"`` bands at 5120 hold column-slab chunk counts of at least
@@ -213,10 +226,64 @@ OWN = {
     "cake_mhc_train_bwd_slab_red__dynr__h7168": ("sm_107a",),
     "cake_mhc_train_bwd_slab_red__dynr_os__h5120": ("sm_107a",),
     "cake_mhc_train_bwd_slab_red__dynr_os__h7168": ("sm_107a",),
+    # The late-draw copies of the fold records (program key ``<program>_late``): on the architectures of a board cell
+    # of BWD_SLAB_DRAW_OVERRIDES at the size with a "late" band in the record's unit order (DRAW_CELLS).
+    "cake_mhc_train_bwd_slab_fold__dynr_late": ("sm_100a", "sm_103a"),
+    "cake_mhc_train_bwd_slab_fold__dynr_os_late": ("sm_100a",),
+    "cake_mhc_train_bwd_slab_fold__dynr_late__h7168": ("sm_100a", "sm_103a"),
+    # The "dep1" fn splits of sm_100a at 4096 and 7168 (FN_SPLIT_CHAIN_OVERRIDES: CHAIN_CELLS), beside the "dep" ones.
+    "cake_mhc_train_fn_split_atomic__tv128_dep1": ("sm_100a",),
+    "cake_mhc_train_fn_split_atomic__tv128_dep1__h7168": ("sm_100a",),
 }
 # The (architecture, hidden size) pairs whose atomic fn split is the "dep1" form (only the last CTA waits for the
 # token-owner pass); the "dep" form elsewhere.
 SPLIT_CHAIN = {("sm_107a", HIDDEN): "dep1"}
+# The (architecture, hidden size) pairs whose route holds the "dep" fn split and its "dep1" copy, one per call by
+# fn_split_bwd_program (each record's select rule names its chain).
+SPLIT_BOTH = (("sm_100a", HIDDEN), ("sm_100a", 7168))
+SPLIT_RULE = "fn_split_bwd_program"
+# The late-draw copies of the fold's two records (program keys ``dynr_late`` / ``dynr_os_late``).
+SLAB_LATE = "cake_mhc_train_bwd_slab_fold__dynr_late"
+SLAB_OS_LATE = "cake_mhc_train_bwd_slab_fold__dynr_os_late"
+# The board cells of record of the fold's draw (BWD_SLAB_DRAW_OVERRIDES) and of the fn split's chain
+# (FN_SPLIT_CHAIN_OVERRIDES), keyed (arch, SM count, hidden): B200 (sm_100a with 148 SMs) and GB300 (sm_103a with 152
+# SMs) draw late at 4096 and 7168 on the 64-token tiles where k7_chunks gives at most one unit per SM (one unit per
+# CTA), minus the tiles of DRAW_DROPPED; B200 runs the "dep1" split at 4096 and 7168 up to 4096 tokens, minus the
+# token ranges of CHAIN_DROPPED (at 4096: 1665 to 1728).
+DRAW_CELLS = {
+    ("sm_100a", 148, 4096): (
+        (1664, "late"), (1728, "ahead"), (2048, "late"), (2112, "ahead"), (2176, "late"), (2304, "ahead"),
+        (2432, "late"), (2496, "ahead"), (2688, "late"), (2880, "ahead"), (2944, "late"), (3072, "ahead"),
+        (3200, "late"), (3520, "ahead"), (3712, "late"), (5184, "ahead"), (5248, "late"), (None, "ahead"),
+    ),
+    ("sm_100a", 148, 7168): (
+        (576, "late"), (640, "ahead"), (704, "late"), (768, "ahead"), (832, "late"), (960, "ahead"), (1024, "late"),
+        (None, "ahead"),
+    ),
+    ("sm_103a", 152, 4096): (
+        (384, "late"), (448, "ahead"), (768, "late"), (896, "ahead"), (1152, "late"), (1344, "ahead"), (1536, "late"),
+        (1792, "ahead"), (1920, "late"), (None, "ahead"),
+    ),
+    ("sm_103a", 152, 7168): (
+        (192, "late"), (256, "ahead"), (384, "late"), (512, "ahead"), (576, "late"), (None, "ahead"),
+    ),
+}  # fmt: skip
+CHAIN_CELLS = {
+    ("sm_100a", 148, 4096): (
+        (1664, "dep1"),
+        (1728, "dep"),
+        (4096, "dep1"),
+        (None, "dep"),
+    ),
+    ("sm_100a", 148, 7168): ((4096, "dep1"), (None, "dep")),
+}
+# The 64-token tiles ``(first, last)`` of a draw cell, and the token ranges of a chain cell, that a cell keeps at the
+# fold's draw / at "dep" although the unit count would allow the late draw / the relay applies: no draw tile; at 4096
+# the B200 chain cell keeps "dep" from 1665 to 1728 tokens (the fold "dynr" with its own draw there).
+DRAW_DROPPED: dict = {}
+CHAIN_DROPPED: dict = {("sm_100a", 148, 4096): ((1665, 1728),)}
+# The token counts the draw-cell tests read: every 64-token tile to 262144 tokens, both ends.
+DRAW_SPAN = 262144
 SLAB = "cake_mhc_train_bwd_slab_fold__dynr"
 LPT = "cake_mhc_train_bwd_slab_fold__lpt"
 # The slab-fastest copies of the column slab's two forms (the units drawn slab-fastest; program key ``<form>_os``); the
@@ -743,9 +810,55 @@ def _atomic_split(arch: str, hidden: int = HIDDEN) -> str:
     )
 
 
+def _atomic_splits(arch: str, hidden: int = HIDDEN) -> list[str]:
+    """The atomic fn splits on the ``bwd_finish`` route of ``arch`` at ``hidden``, in route order:
+    :func:`_atomic_split`, then its ``_dep1`` copy where the pair is one of :data:`SPLIT_BOTH`."""
+    split = _atomic_split(arch, hidden)
+    if (arch, hidden) not in SPLIT_BOTH:
+        return [split]
+    return [split, split.replace("_dep" + _suffix(hidden), "_dep1" + _suffix(hidden))]
+
+
+def _chain_cell(arch: str, sm: int | None, hidden: int = HIDDEN) -> tuple:
+    """The chain bands a call on ``arch`` with ``sm`` SMs (``None``: no SM count) at ``hidden`` reads at call time: the
+    cell of ``FN_SPLIT_CHAIN_OVERRIDES`` under the exact key ``(arch, sm, hidden)``, else ``"dep"`` everywhere."""
+    key = (arch, sm, hidden)
+    if sm is not None and key in nd.FN_SPLIT_CHAIN_OVERRIDES:
+        return nd.FN_SPLIT_CHAIN_OVERRIDES[key]
+    return ((None, "dep"),)
+
+
+def _split_at(T: int, sm: int | None, arch: str, hidden: int = HIDDEN) -> str:
+    """The atomic fn split the ``bwd_finish`` selection holds at ``T``: the ``_dep1`` copy where the pair ships both
+    chains and the board's chain band of ``T`` (:func:`_chain_cell`) is ``"dep1"``, else :func:`_atomic_split`."""
+    splits = _atomic_splits(arch, hidden)
+    if len(splits) == 2 and _band_at(T, _chain_cell(arch, sm, hidden)) == "dep1":
+        return splits[1]
+    return splits[0]
+
+
+def _draw_cell(arch: str, sm: int | None, hidden: int = HIDDEN) -> tuple:
+    """The draw bands a call on ``arch`` with ``sm`` SMs (``None``: no SM count) at ``hidden`` reads at call time: the
+    cell of ``BWD_SLAB_DRAW_OVERRIDES`` under the exact key ``(arch, sm, hidden)``, else ``"ahead"`` everywhere."""
+    key = (arch, sm, hidden)
+    if sm is not None and key in nd.BWD_SLAB_DRAW_OVERRIDES:
+        return nd.BWD_SLAB_DRAW_OVERRIDES[key]
+    return ((None, "ahead"),)
+
+
 def _slab(hidden: int = HIDDEN) -> str:
     """The column slab's ``dynr`` record of ``hidden``."""
     return SLAB + _suffix(hidden)
+
+
+def _slab_late(hidden: int = HIDDEN) -> str:
+    """The column slab's late-draw ``dynr_late`` record of ``hidden``."""
+    return SLAB_LATE + _suffix(hidden)
+
+
+def _slab_os_late(hidden: int = HIDDEN) -> str:
+    """The column slab's slab-fastest late-draw ``dynr_os_late`` record of ``hidden``."""
+    return SLAB_OS_LATE + _suffix(hidden)
 
 
 def _lpt(hidden: int = HIDDEN) -> str:
@@ -775,16 +888,19 @@ def _lpt_os(hidden: int = HIDDEN) -> str:
 
 def _slabs(arch: str, hidden: int = HIDDEN) -> list[str]:
     """The column slab's records on the ``bwd_finish`` route of ``arch`` at ``hidden``, in route order: ``dynr``,
-    ``dynr_red``, ``lpt``, ``dynr_os``, ``dynr_os_red``, ``lpt_os``, each where the architecture has the record of
-    the size (a size's ``_os`` record exists only where some architecture's ``BWD_SLAB_ORDER`` of the size has a
-    ``"slab"`` band; a reduction form only where the architecture's ``dfn`` form of record is ``"red"``)."""
+    ``dynr_late``, ``dynr_red``, ``lpt``, ``dynr_os``, ``dynr_os_late``, ``dynr_os_red``, ``lpt_os``, each where the
+    architecture has the record of the size (a size's ``_os`` record exists only where some architecture's
+    ``BWD_SLAB_ORDER`` of the size has a ``"slab"`` band; a reduction form only where the architecture's ``dfn`` form
+    of record is ``"red"``; a late-draw copy only where a draw cell routes it)."""
     return [
         name
         for name in (
             _slab(hidden),
+            _slab_late(hidden),
             _red(hidden),
             _lpt(hidden),
             _slab_os(hidden),
+            _slab_os_late(hidden),
             _red_os(hidden),
             _lpt_os(hidden),
         )
@@ -849,14 +965,15 @@ def _program_at(
 ) -> str:
     """The column slab's program at ``T`` under the tables read at call time: ``lpt`` where ``lpt_chunks`` gives a
     geometry, else ``dynr``; ``_os`` appended where the board's unit-order band of ``T`` (:func:`_order_cell`) is
-    ``"slab"``; ``_red`` appended where :func:`_dfn_suffix` names it."""
+    ``"slab"``; ``_red`` appended where :func:`_dfn_suffix` names it; ``_late`` appended to the fold ``dynr`` /
+    ``dynr_os`` where the board's draw band of ``T`` (:func:`_draw_cell`) is ``"late"``."""
     base = "lpt" if nd.lpt_chunks(T, sm, arch, hidden=hidden) else "dynr"
     order = _band_at(T, _order_cell(arch, sm, hidden))
-    return (
-        base
-        + ("_os" if order == "slab" else "")
-        + _dfn_suffix(arch, base, deterministic_algorithms)
+    red = _dfn_suffix(arch, base, deterministic_algorithms)
+    late = (
+        base == "dynr" and not red and _band_at(T, _draw_cell(arch, sm, hidden)) == "late"
     )
+    return base + ("_os" if order == "slab" else "") + red + ("_late" if late else "")
 
 
 def _record_of(program: str, hidden: int = HIDDEN) -> str:
@@ -868,6 +985,8 @@ def _record_of(program: str, hidden: int = HIDDEN) -> str:
         "lpt_os": LPT_OS,
         "dynr_red": RED,
         "dynr_os_red": RED_OS,
+        "dynr_late": SLAB_LATE,
+        "dynr_os_late": SLAB_OS_LATE,
     }
     return names[program] + _suffix(hidden)
 
@@ -1036,10 +1155,50 @@ def test_own_records_keep_the_deterministic_launch() -> None:
                 "program": form + ("_red" if stem.endswith("_slab_red") else ""),
                 "rule": "bwd_slab_atomic_program",
             }, name
+        elif any(name in _atomic_splits(a, hidden) for a, h in SPLIT_BOTH if h == hidden):
+            # a fn split whose form ships in both chains selects its chain
+            assert record["select_rule"] == {
+                "kind": "program",
+                "program": name.removesuffix(_suffix(hidden)).rsplit("_", 1)[1],
+                "rule": SPLIT_RULE,
+            }, name
         else:
             assert record["select_rule"] is None, name
         assert record["workspace_rule"] == {"kind": "regions", "workspace": "bwd"}
         assert name not in nd.RECORD_SCALARS, name
+    # the "dep1" copy of a fn split: its "dep" record under its own name and chain, on sm_100a
+    for arch, hidden in SPLIT_BOTH:
+        dep, dep1 = _atomic_splits(arch, hidden)
+        record, reference = nd.MODULES[dep1], nd.MODULES[dep]
+        assert tuple(record["arches"]) == (arch,) and arch in reference["arches"], dep1
+        assert record == {
+            **reference,
+            "arches": record["arches"],
+            "kernel": dep1,
+            "kernel_symbol": f"kernel_{dep1}",
+            "library": dep1,
+            "select_rule": {**reference["select_rule"], "program": "dep1"},
+        }, dep1
+    # the late-draw copy of a fold record: the record under its own name and program key ``<program>_late``
+    lates = 0
+    for hidden in HIDDEN_SIZES:
+        for base, name in ((_slab(hidden), _slab_late(hidden)), (_slab_os(hidden), _slab_os_late(hidden))):
+            if name not in OWN:
+                assert name not in nd.MODULES, name
+                continue
+            lates += 1
+            record, reference = nd.MODULES[name], nd.MODULES[base]
+            assert set(record["arches"]) <= set(reference["arches"]), name
+            program = reference["select_rule"]["program"] + "_late"
+            assert record == {
+                **reference,
+                "arches": record["arches"],
+                "kernel": name,
+                "kernel_symbol": f"kernel_{name}",
+                "library": name,
+                "select_rule": {**reference["select_rule"], "program": program},
+            }, name
+    assert lates == len([n for n in OWN if n.removesuffix(_suffix(7168)).endswith("_late")]) == 3, lates
     for arch in det.ARCHES:
         for hidden in _arch_sizes(arch):
             what = (arch, hidden)
@@ -1310,7 +1469,7 @@ def test_routes_are_the_deterministic_routes_but_bwd_finish() -> None:
             tokens = [_renamed(n) for n in det_route if _det_role(n) == "bwd_token"]
             assert tokens, (arch, key)
             slabs = _slabs(arch, hidden)
-            assert route == [*tokens, _atomic_split(arch, hidden), *slabs], (arch, key)
+            assert route == [*tokens, *_atomic_splits(arch, hidden), *slabs], (arch, key)
             assert {nd.MODULES[n]["hidden"] for n in route} == {hidden}, (arch, key)
             assert {_det_role(n) for n in det_route} == {
                 "fn_split_bwd",
@@ -1363,7 +1522,7 @@ def test_selection_is_the_deterministic_selection_but_bwd_finish(
                     _renamed(n) for n in det_names if _det_role(n) == "bwd_token"
                 )
                 slab = _slab_record(T, sm, arch, hidden)
-                assert names == (*tokens, _atomic_split(arch, hidden), slab), (
+                assert names == (*tokens, _split_at(T, sm, arch, hidden), slab), (
                     what,
                     names,
                 )
@@ -1433,19 +1592,26 @@ def _possible_programs(arch: str, hidden: int) -> set[str]:
     under ``torch.use_deterministic_algorithms(True)`` runs it)."""
     boards = {None} | {
         sm
-        for cells in (nd.BWD_SLAB_ORDER_OVERRIDES, nd.BWD_SLAB_LPT_OVERRIDES)
+        for cells in (
+            nd.BWD_SLAB_ORDER_OVERRIDES,
+            nd.BWD_SLAB_LPT_OVERRIDES,
+            nd.BWD_SLAB_DRAW_OVERRIDES,
+        )
         for a, sm, h in cells
         if (a, h) == (arch, hidden)
     }
     programs = set()
     for sm in boards:
         order, entry = _order_cell(arch, sm, hidden), _lpt_cell(arch, sm, hidden)
+        draw = _draw_cell(arch, sm, hidden)
         bands = entry if entry is not None and isinstance(entry[0], tuple) else ()
-        edges = sorted({t for t, _ in (*order, *bands) if t is not None})
+        edges = sorted({t for t, _ in (*order, *bands, *draw) if t is not None})
         for T in (1, *(t + 1 for t in edges)):
             suffix = "_os" if _band_at(T, order) == "slab" else ""
             programs.add("dynr" + suffix)
             programs.add("dynr" + suffix + _dfn_suffix(arch, "dynr"))
+            if _band_at(T, draw) == "late":
+                programs.add("dynr" + suffix + "_late")
             if _calibration_at(entry, T) is not None:
                 programs.add("lpt" + suffix)
     return programs
@@ -1487,7 +1653,7 @@ def test_slab_tables_route_every_program_they_name() -> None:
             for program, name in routed.items():
                 assert name == _record_of(program, hidden), (what, name)
                 if program.removesuffix("_red").endswith("_os") or program.endswith(
-                    "_red"
+                    ("_red", "_late")
                 ):
                     assert program in possible, (what, name, sorted(possible))
                     checked += 1
@@ -1548,7 +1714,7 @@ def test_pdl_follows_the_deterministic_edges(arch: str, sm: int) -> None:
     slabs = {
         hidden: (
             _slabs(arch, hidden),
-            _atomic_split(arch, hidden),
+            _atomic_splits(arch, hidden),
             [
                 n
                 for n in det.route_modules(arch, hidden, "bwd_finish")
@@ -1557,7 +1723,7 @@ def test_pdl_follows_the_deterministic_edges(arch: str, sm: int) -> None:
         )
         for hidden in sizes
     }
-    for hidden, (names, _split, det_slabs) in slabs.items():
+    for hidden, (names, _splits, det_slabs) in slabs.items():
         assert det_slabs, (arch, hidden)
         for name in names:
             assert nd.pdl_edge(nd.MODULES[name]["library"]) == "K6->K7", name
@@ -1578,7 +1744,7 @@ def test_pdl_follows_the_deterministic_edges(arch: str, sm: int) -> None:
             det_value = _pdl_value(
                 T, det.PDL_OFF_BANDS.get(arch, {}).get("K6->K7", {}).get(path, ())
             )
-            for hidden, (names, split, det_slabs) in slabs.items():
+            for hidden, (names, splits, det_slabs) in slabs.items():
                 value = _pdl_value(T, _pdl_cell(arch, None, hidden, "K6->K7", path))
                 for name in names:
                     assert nd.enable_pdl(name, T, arch, path) == value, (T, path, name)
@@ -1591,7 +1757,8 @@ def test_pdl_follows_the_deterministic_edges(arch: str, sm: int) -> None:
                 own = PDL_OVERRIDES.get((arch, None, hidden), {}).get("K6->K7", {})
                 if own.get(path) is None:
                     assert value == det_value, (T, path, hidden)
-                assert nd.enable_pdl(split, T, arch, path) == 1, (T, path, hidden)
+                for split in splits:
+                    assert nd.enable_pdl(split, T, arch, path) == 1, (T, path, split)
             for name in copied:
                 assert nd.enable_pdl(_renamed(name), T, arch, path) == det.enable_pdl(
                     name, T, arch, path
@@ -2187,9 +2354,13 @@ _OWN_RULES = (
     "BWD_SLAB_ORDER",
     "BWD_SLAB_ORDER_OVERRIDES",
     "BWD_SLAB_LPT_OVERRIDES",
+    "BWD_SLAB_DRAW_OVERRIDES",
+    "FN_SPLIT_CHAIN_OVERRIDES",
     "lpt_chunks",
     "bwd_slab_order",
+    "bwd_slab_draw",
     "bwd_slab_atomic_program",
+    "fn_split_bwd_program",
     "slab_plan",
 )
 
@@ -2238,6 +2409,7 @@ def test_host_rules_are_copies_of_the_deterministic_ones(arch: str, sm: int) -> 
     own_rules = (
         *(rule for rule in det.PROGRAM_RULES if rule not in _DROPPED_RULES),
         "bwd_slab_atomic_program",
+        SPLIT_RULE,
     )
     assert own_rules == nd.PROGRAM_RULES
     for name in (
@@ -2486,8 +2658,9 @@ def test_two_size_rule(arch: str, sm: int, hidden: int, calibration: str) -> Non
     ``None`` never fires; ``bwd_slab_atomic_program`` is ``lpt`` exactly where ``lpt_chunks`` gives a geometry, else
     ``dynr``, with ``_os``
     where the board's unit-order band (:func:`_order_cell`: the size's ``BWD_SLAB_ORDER``, or the board's cell) is
-    ``"slab"`` (``dynr`` with ``_red`` on an architecture whose ``dfn`` form is ``"red"``: :func:`_dfn_suffix`), and
-    the selection holds that one column-slab record of the size; ``slab_plan`` is the geometry, else
+    ``"slab"`` (``dynr`` with ``_red`` on an architecture whose ``dfn`` form is ``"red"``: :func:`_dfn_suffix`, and
+    the fold ``dynr`` / ``dynr_os`` with ``_late`` in a ``"late"`` band of the board's draw cell: :func:`_draw_cell`),
+    and the selection holds that one column-slab record of the size; ``slab_plan`` is the geometry, else
     the one-size chunks of ``host_plan``.  A geometry is 64-token multiples, ``1 <= p_big <= P <= 32``, big chunks
     within six tiles under the one-size chunks, covering the tokens: two sizes (the big chunks leave tokens, a smaller
     small chunk) or one (``p_big = P``, the last chunk holding tokens); its list-scheduling makespan over the size's
@@ -2512,8 +2685,10 @@ def test_two_size_rule(arch: str, sm: int, hidden: int, calibration: str) -> Non
                 order = _band_at(T, _order_cell(arch, sm, hidden))
                 program = nd.bwd_slab_atomic_program(T, sm, arch, hidden)
                 base = "lpt" if geometry else "dynr"
-                assert program == base + ("_os" if order == "slab" else "") + (
-                    _dfn_suffix(arch, base)
+                red = _dfn_suffix(arch, base)
+                late = base == "dynr" and not red and _band_at(T, _draw_cell(arch, sm, hidden)) == "late"
+                assert program == base + ("_os" if order == "slab" else "") + red + (
+                    "_late" if late else ""
                 ), what
                 names = nd.selected_modules(
                     arch, hidden, "bwd_finish", rows=T, sm_count=sm
@@ -2571,7 +2746,7 @@ def test_two_size_rule_fires_where_calibrated(arch: str, sm: int, fires: dict) -
     the deterministic column slab without a failing test.  The program is ``dynr`` / ``dynr_os``, ``_os`` exactly
     where the board's unit-order band (:func:`_order_cell`) is ``"slab"``, and ``_red`` after it exactly where the
     architecture's ``dfn`` form is ``"red"``: on sm_107a with 212 SMs ``dynr_red`` at 1024 and 1536, ``dynr_os_red``
-    from 2048."""
+    from 2048; ``_late`` after the fold exactly in a ``"late"`` band of the board's draw cell (:func:`_draw_cell`)."""
     _clear_plans()
     try:
         got = {T: nd.lpt_chunks(T, sm, arch) for T in BENCH_T}
@@ -2586,7 +2761,16 @@ def test_two_size_rule_fires_where_calibrated(arch: str, sm: int, fires: dict) -
         slab_order = _band_at(T, _order_cell(arch, sm)) == "slab"
         red = program.endswith("_red")
         assert red == (DFN_FORM[arch] == "red"), (T, program)
-        assert program.removesuffix("_red").endswith("_os") == slab_order, (T, program)
+        late = (
+            not red
+            and not program.startswith("lpt")
+            and _band_at(T, _draw_cell(arch, sm)) == "late"
+        )
+        assert program.endswith("_late") == late, (T, program)
+        assert (
+            program.removesuffix("_red").removesuffix("_late").endswith("_os")
+            == slab_order
+        ), (T, program)
     if (arch, sm) == ("sm_107a", 212):
         assert {T: programs[T] for T in (1024, 1536, 2048)} == {
             1024: "dynr_red",
@@ -2837,7 +3021,8 @@ def test_column_slab_rule_without_a_calibration_of_the_size(
     ``BWD_SLAB_ORDER`` or the board's cell: :func:`_order_cell`, is ``"slab"``) at every token count.  With
     ``_lpt_plan`` replaced by a function that raises (the rule never runs the screen there), at the token counts of
     record, of ``LPT_SWEEP`` and of ``LPT_HIDDEN_T``: ``lpt_chunks`` is ``None`` and ``bwd_slab_atomic_program``
-    ``dynr`` / ``dynr_os`` (with ``_red`` where the architecture's ``dfn`` form is ``"red"``); ``slab_plan`` is the
+    ``dynr`` / ``dynr_os`` (with ``_red`` where the architecture's ``dfn`` form is ``"red"``, and ``_late`` in a
+    ``"late"`` band of the board's draw cell: :func:`_draw_cell`); ``slab_plan`` is the
     one-size chunks of ``k7_chunks`` at the size (``P`` and the rows per chunk of the deterministic ``host_plan`` of
     the size: both backwards sum the partials of the same chunks); where
     the architecture routes the size the ``bwd_finish`` selection holds that record of the size.  The order of some
@@ -2856,8 +3041,10 @@ def test_column_slab_rule_without_a_calibration_of_the_size(
         assert nd.lpt_chunks(T, sm, arch, hidden=hidden) is None, what
         order = _band_at(T, _order_cell(arch, sm, hidden))
         by_cell += order != _band_at(T, nd.BWD_SLAB_ORDER[hidden][arch])
+        red = _dfn_suffix(arch, "dynr")
+        late = not red and _band_at(T, _draw_cell(arch, sm, hidden)) == "late"
         program = (
-            "dynr" + ("_os" if order == "slab" else "") + _dfn_suffix(arch, "dynr")
+            "dynr" + ("_os" if order == "slab" else "") + red + ("_late" if late else "")
         )
         assert nd.bwd_slab_atomic_program(T, sm, arch, hidden) == program, what
         plan = det.host_plan(T, sm, arch, hidden)
@@ -3200,6 +3387,235 @@ def test_r200_cells_follow_the_chunk_count() -> None:
     assert slab_t + chunk_t + kept_t == R200_CELL_SPAN_5120, (slab_t, chunk_t, kept_t)
 
 
+@pytest.mark.cpu_only
+def test_draw_and_chain_cells_of_record() -> None:
+    """``BWD_SLAB_DRAW_OVERRIDES`` / ``FN_SPLIT_CHAIN_OVERRIDES`` are the board cells of record (:data:`DRAW_CELLS`,
+    :data:`CHAIN_CELLS`), exported and well formed: each key ``(arch, sm, hidden)`` has a known architecture, an SM
+    count that is a positive int and a hidden size the architecture routes; a draw cell is token-count bands of
+    ``"ahead"`` / ``"late"``, a chain cell of ``"dep"`` / ``"dep1"``.  On both sides of every band edge
+    ``bwd_slab_draw`` / ``fn_split_bwd_program`` read the cell with its board's SM count, and ``"ahead"`` / ``"dep"``
+    without an SM count and with another one; a cell naming another value is a ``ValueError``."""
+    assert nd.BWD_SLAB_DRAW_OVERRIDES == DRAW_CELLS
+    assert nd.FN_SPLIT_CHAIN_OVERRIDES == CHAIN_CELLS
+    assert {
+        "BWD_SLAB_DRAW_OVERRIDES",
+        "FN_SPLIT_CHAIN_OVERRIDES",
+        "bwd_slab_draw",
+        "fn_split_bwd_program",
+    } <= set(nd.__all__)
+    checks = (
+        (
+            nd.BWD_SLAB_DRAW_OVERRIDES,
+            ("ahead", "late"),
+            lambda T, arch, sm, hidden: nd.bwd_slab_draw(T, arch, hidden, sm_count=sm),
+        ),
+        (
+            nd.FN_SPLIT_CHAIN_OVERRIDES,
+            ("dep", "dep1"),
+            lambda T, arch, sm, hidden: nd.fn_split_bwd_program(T, sm, arch, hidden),
+        ),
+    )
+    for cells, values, rule in checks:
+        assert cells
+        for key, cell in cells.items():
+            arch, sm, hidden = key
+            assert arch in nd.ARCHES and type(sm) is int and sm > 0, key
+            assert type(hidden) is int and hidden in nd.supported_hidden_sizes(arch), key
+            assert _valid_bands(cell, lambda value, values=values: value in values), (
+                key,
+                cell,
+            )
+            edges = {t + side for t, _ in cell if t is not None for side in (0, 1)}
+            for T in sorted({1, *edges}):
+                assert rule(T, arch, sm, hidden) == _band_at(T, cell), (key, T)
+                for other in (None, sm - 4, sm + 4):
+                    assert rule(T, arch, other, hidden) == values[0], (key, other, T)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setitem(nd.BWD_SLAB_DRAW_OVERRIDES, ("sm_100a", 148, HIDDEN), ((None, "first"),))
+        with pytest.raises(ValueError, match="names the draw"):
+            nd.bwd_slab_draw(1, "sm_100a", HIDDEN, sm_count=148)
+        patch.setitem(nd.FN_SPLIT_CHAIN_OVERRIDES, ("sm_100a", 148, HIDDEN), ((None, "dep2"),))
+        with pytest.raises(ValueError, match="names the chain"):
+            nd.fn_split_bwd_program(1, 148, "sm_100a", HIDDEN)
+
+
+@pytest.mark.cpu_only
+def test_draw_cells_follow_the_unit_count() -> None:
+    """Each draw cell of record holds the rule it was cut by: on every 64-token tile up to :data:`DRAW_SPAN` tokens,
+    at both ends of the tile, the board draws ``"late"`` exactly where ``k7_chunks`` at the board's SM count and
+    hidden size gives at most one unit per SM (one unit per CTA) and the tile is not one of the cell's
+    :data:`DRAW_DROPPED` tiles, and ``"ahead"`` everywhere else; the cell's last band names ``"ahead"``.  A change of
+    ``k7_chunks`` or of a cell that moves the unit count under the bands fails here, not on a device."""
+    assert set(nd.BWD_SLAB_DRAW_OVERRIDES) == set(DRAW_CELLS)
+    for key, cell in nd.BWD_SLAB_DRAW_OVERRIDES.items():
+        arch, sm, hidden = key
+        dropped = DRAW_DROPPED.get(key, ())
+        assert cell[-1] == (None, "ahead"), key
+        late = 0
+        for tile in range(1, DRAW_SPAN // 64 + 1):
+            for T in (64 * tile - 63, 64 * tile):
+                units = nd.k7_chunks(T, sm, hidden=hidden)[1]
+                kept = any(lo <= T <= hi for lo, hi in dropped)
+                want = "late" if units <= sm and not kept else "ahead"
+                assert _band_at(T, cell) == want, (key, T, units)
+                assert nd.bwd_slab_draw(T, arch, hidden, sm_count=sm) == want, (key, T)
+                late += want == "late"
+        assert late, key
+
+
+@pytest.mark.cpu_only
+def test_relay_cells() -> None:
+    """The chain cells of record hold the relay's bands: ``"dep1"`` on B200 (sm_100a with 148 SMs) at hidden 4096 and
+    7168 up to 4096 tokens, but the cell's :data:`CHAIN_DROPPED` token ranges (at 4096 from 1665 to 1728), and
+    ``"dep"`` above; no other board or hidden size has a cell."""
+    assert set(nd.FN_SPLIT_CHAIN_OVERRIDES) == {
+        ("sm_100a", 148, hidden) for hidden in (HIDDEN, 7168)
+    }
+    assert {(arch, hidden) for arch, _sm, hidden in nd.FN_SPLIT_CHAIN_OVERRIDES} == set(SPLIT_BOTH)
+    for key, cell in nd.FN_SPLIT_CHAIN_OVERRIDES.items():
+        dropped = CHAIN_DROPPED.get(key, ())
+        edges = {t + side for t, _ in cell if t is not None for side in (0, 1)}
+        ends = {t for r in dropped for t in r}
+        for T in sorted({1, 2, 4095, 4096, 4097, 8192, 65536, *edges, *ends}):
+            kept = any(lo <= T <= hi for lo, hi in dropped)
+            want = "dep1" if T <= 4096 and not kept else "dep"
+            assert _band_at(T, cell) == want, (key, T)
+
+
+@pytest.mark.cpu_only
+def test_late_and_relay_records_ship_where_the_cells_route_them() -> None:
+    """A late-draw record of a size ships on exactly the architectures of the size's draw cells whose ``"late"`` bands
+    meet the record's unit order on the same board (:func:`_order_cell`: ``dynr_late`` a ``"chunk"`` band,
+    ``dynr_os_late`` a ``"slab"`` band), and its route holds it on each of them; a size without such a cell has no
+    late-draw record.  A fn split's ``"dep1"`` copy ships on exactly the architectures of its size's chain cells with
+    a ``"dep1"`` band."""
+    for hidden in HIDDEN_SIZES:
+        for name, want_order in (
+            (_slab_late(hidden), "chunk"),
+            (_slab_os_late(hidden), "slab"),
+        ):
+            arches = set()
+            for (arch, sm, size), draw in nd.BWD_SLAB_DRAW_OVERRIDES.items():
+                if size != hidden:
+                    continue
+                order = _order_cell(arch, sm, hidden)
+                edges = sorted({t for t, _ in (*draw, *order) if t is not None})
+                if any(
+                    _band_at(T, draw) == "late" and _band_at(T, order) == want_order
+                    for T in (1, *(t + 1 for t in edges))
+                ):
+                    arches.add(arch)
+            assert set(OWN.get(name, ())) == arches, (name, sorted(arches))
+            assert (name in nd.MODULES) == bool(arches), name
+            for arch in arches:
+                assert name in nd.route_modules(arch, hidden, "bwd_finish"), (name, arch)
+    relay = {
+        (arch, hidden)
+        for (arch, _sm, hidden), cell in nd.FN_SPLIT_CHAIN_OVERRIDES.items()
+        if any(chain == "dep1" for _t, chain in cell)
+    }
+    assert relay == set(SPLIT_BOTH)
+    for arch, hidden in SPLIT_BOTH:
+        dep1 = _atomic_splits(arch, hidden)[1]
+        assert tuple(nd.MODULES[dep1]["arches"]) == (arch,), dep1
+        assert dep1 in nd.route_modules(arch, hidden, "bwd_finish"), dep1
+
+
+# The boards the draw / chain cells are checked against: the boards of record, GB200 (sm_100a with 152 SMs), B300
+# (sm_103a with 148 SMs) and R200 with 212 SMs.
+CELL_BOARDS = (*det.RULES_BOARDS, ("sm_100a", 152), ("sm_103a", 148), ("sm_107a", 212))
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("deterministic_algorithms", (False, True))
+@pytest.mark.parametrize(("arch", "sm"), CELL_BOARDS)
+def test_draw_and_chain_cells_change_only_their_board(
+    arch: str, sm: int, deterministic_algorithms: bool, monkeypatch
+) -> None:
+    """The draw and chain cells of record change the ``bwd_finish`` selection of their own board alone: on every board
+    of :data:`CELL_BOARDS`, at every hidden size the architecture routes, at the token counts of record and on both
+    sides of every band edge of the cells, with ``torch.use_deterministic_algorithms(True)`` and without, the selection
+    equals the one with both tables emptied -- except on a cell's board in its bands: in a ``"late"`` band the column
+    slab is the late-draw copy of the record selected without the cells (``dynr`` / ``dynr_os`` of the size), in a
+    ``"dep1"`` band the fn split is the ``"dep1"`` copy of the ``"dep"`` split, every other record the same."""
+    edges = {
+        t + side
+        for cells in (nd.BWD_SLAB_DRAW_OVERRIDES, nd.FN_SPLIT_CHAIN_OVERRIDES)
+        for cell in cells.values()
+        for t, _ in cell
+        if t is not None
+        for side in (0, 1)
+    }
+    token_counts = sorted({*T_VALUES, *edges})
+
+    def selection() -> dict:
+        return {
+            (hidden, T): nd.selected_modules(
+                arch,
+                hidden,
+                "bwd_finish",
+                rows=T,
+                sm_count=sm,
+                deterministic_algorithms=deterministic_algorithms,
+            )
+            for hidden in _arch_sizes(arch)
+            for T in token_counts
+        }
+
+    shipped = selection()
+    monkeypatch.setattr(nd, "BWD_SLAB_DRAW_OVERRIDES", {})
+    monkeypatch.setattr(nd, "FN_SPLIT_CHAIN_OVERRIDES", {})
+    without = selection()
+    changed, expected = set(), set()
+    for (hidden, T), names in shipped.items():
+        key, base = (arch, sm, hidden), list(without[hidden, T])
+        late = key in DRAW_CELLS and _band_at(T, DRAW_CELLS[key]) == "late"
+        relay = key in CHAIN_CELLS and _band_at(T, CHAIN_CELLS[key]) == "dep1"
+        if late:
+            copies = {_slab(hidden): _slab_late(hidden), _slab_os(hidden): _slab_os_late(hidden)}
+            assert base[-1] in copies, (hidden, T, base)
+            base[-1] = copies[base[-1]]
+        if relay:
+            dep, dep1 = _atomic_splits(arch, hidden)
+            base[base.index(dep)] = dep1
+        assert names == tuple(base), (hidden, T, names, without[hidden, T])
+        if names != without[hidden, T]:
+            changed.add((hidden, T))
+        if late or relay:
+            expected.add((hidden, T))
+    assert changed == expected, sorted(changed ^ expected)[:10]
+    boards = {(a, s) for a, s, _h in (*DRAW_CELLS, *CHAIN_CELLS)}
+    assert bool(changed) == ((arch, sm) in boards), (arch, sm)
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("key", sorted({*DRAW_CELLS, *CHAIN_CELLS}))
+def test_cell_edges_select_their_records(key: tuple) -> None:
+    """On a cell's board, on both sides of every band edge of its draw and chain cells (and at 1 token), the
+    ``bwd_finish`` selection holds one fn split and one column slab: the column slab of :func:`_program_at` (the
+    late-draw copy in a ``"late"`` band) and the fn split of :func:`_split_at` (the ``"dep1"`` copy in a ``"dep1"``
+    band), with and without ``torch.use_deterministic_algorithms(True)`` (the late draw keeps the fold, so both select
+    the same records)."""
+    arch, sm, hidden = key
+    cells = [c[key] for c in (DRAW_CELLS, CHAIN_CELLS) if key in c]
+    edges = {t + side for cell in cells for t, _ in cell if t is not None for side in (0, 1)}
+    seen = set()
+    for T in sorted({1, *edges}):
+        for flag in (False, True):
+            names = nd.selected_modules(
+                arch, hidden, "bwd_finish", rows=T, sm_count=sm, deterministic_algorithms=flag
+            )
+            slabs = [n for n in names if nd.MODULES[n]["role"] == "bwd_slab"]
+            splits = [n for n in names if nd.MODULES[n]["role"] == "fn_split_bwd"]
+            assert slabs == [_slab_record(T, sm, arch, hidden, flag)], (T, flag, names)
+            assert splits == [_split_at(T, sm, arch, hidden)], (T, flag, names)
+            seen |= {*slabs, *splits}
+    if key in DRAW_CELLS:
+        assert seen & {_slab_late(hidden), _slab_os_late(hidden)}, seen
+    if key in CHAIN_CELLS:
+        assert _atomic_splits(arch, hidden)[1] in seen, seen
+
+
 # A test table for the lookup of the board cells, which reads the cells of the exact key (arch, SM count, hidden
 # size) alone: the cells of sm_107a with 212 SMs at 4096 differ from the tables at every token count of
 # SLAB_PRECEDENCE_T, and the keys with None (no SM count; every hidden size) match no call.
@@ -3233,7 +3649,8 @@ def test_slab_override_lookup(monkeypatch) -> None:
     a call with an SM count reads the cells of the exact key ``(arch, sm_count, hidden)``; every other call -- another
     SM count or architecture, no SM count -- reads ``BWD_SLAB_ORDER`` / ``BWD_SLAB_LPT``, and the keys with ``None``
     match nothing (:data:`SLAB_PRECEDENCE`).  ``bwd_slab_atomic_program`` and ``lpt_chunks`` pass the SM count:
-    ``_os`` exactly where the order read is ``"slab"``, no geometry where the calibration read is ``None``.  An error
+    ``_os`` exactly where the order read is ``"slab"``, no geometry where the calibration read is ``None``, ``_late``
+    after the fold in a ``"late"`` band of the board's draw cell (:func:`_draw_cell`).  An error
     names what it read (the cell's key, or the table, architecture and size), and ``sm_count`` is a keyword: as a
     fourth positional argument it is a ``TypeError``, never a value bound to another parameter."""
     monkeypatch.setattr(nd, "BWD_SLAB_ORDER_OVERRIDES", SLAB_PRECEDENCE_ORDER)
@@ -3261,8 +3678,10 @@ def test_slab_override_lookup(monkeypatch) -> None:
                 assert geometry is None, what
             program = nd.bwd_slab_atomic_program(T, sm, arch)
             base = "lpt" if geometry else "dynr"
-            assert program == base + ("_os" if order == "slab" else "") + (
-                _dfn_suffix(arch, base)
+            red = _dfn_suffix(arch, base)
+            late = base == "dynr" and not red and _band_at(T, _draw_cell(arch, sm)) == "late"
+            assert program == base + ("_os" if order == "slab" else "") + red + (
+                "_late" if late else ""
             ), what
     assert on_212 == [
         ("slab", None),

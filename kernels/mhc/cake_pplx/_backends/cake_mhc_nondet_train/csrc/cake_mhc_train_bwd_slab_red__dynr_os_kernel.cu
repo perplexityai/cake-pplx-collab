@@ -235,6 +235,8 @@ kernel_cake_mhc_train_bwd_slab_red__dynr_os(const __grid_constant__ CUtensorMap 
     const int dy0_addr_t_3 = smem + 58368;
     __nv_bfloat16* dus = reinterpret_cast<__nv_bfloat16*>(smem_raw + 66560);
     const int dus_addr = smem + 66560;
+    __nv_bfloat16* xyu = reinterpret_cast<__nv_bfloat16*>(smem_raw + 1024);
+    const int xyu_addr = smem + 1024;
     __nv_bfloat16* dz_0 = reinterpret_cast<__nv_bfloat16*>(smem_raw + 74752);
     const int dz0_addr_t_0 = smem + 74752;
     __nv_bfloat16* dz_1 = reinterpret_cast<__nv_bfloat16*>(smem_raw + 78848);
@@ -1213,7 +1215,7 @@ kernel_cake_mhc_train_bwd_slab_red__dynr_os(const __grid_constant__ CUtensorMap 
                     asm volatile("cp.async.wait_group 0;");
                     __syncwarp();
                     asm volatile("tcgen05.fence::after_thread_sync;");
-                    unsigned int sbase = x0_addr_t_0 + ep_stage * 86016;
+                    unsigned int sbase = xyu_addr + ep_stage * 86016;
                     unsigned int tv[24];
                     unsigned int wpp[2];
                     unsigned int wrow = wtab + (unsigned int)(tq * 48);
