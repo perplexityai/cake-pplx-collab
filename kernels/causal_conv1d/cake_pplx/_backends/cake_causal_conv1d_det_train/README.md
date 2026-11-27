@@ -139,12 +139,23 @@ its record's full co-resident grid.  `y` does not depend on its grid.
 
 | `cooperative` | program | behavior |
 |---|---|---|
-| `False` (default; `None` = `kcp.COOPERATIVE_DEFAULT`) | `kcp_bwd_split` + its `reduce` program | an ordinary launch one SM short of the co-resident CTA count writes per-CTA partial rows; a programmatically dependent reduce program on the same stream sums them in a fixed order.  It starts beside a small kernel resident on another stream (for example a communication kernel); more such kernels delay some CTAs, never the whole launch |
+| `False` (default; `None` = `kcp.COOPERATIVE_DEFAULT`) | `kcp_bwd_split` + its `reduce` program | an ordinary launch a few SMs short of the co-resident CTA count (10 on sm_103a, `kcp.SPLIT_RESERVE_SMS`; 1, the record's `reserve_sms`, on sm_100a and sm_107a) writes per-CTA partial rows; a programmatically dependent reduce program on the same stream sums them in a fixed order.  It starts beside small kernels resident on other streams (for example a communication kernel) on the reserved SMs; more such kernels delay some CTAs, never the whole launch |
 | `True` | `kcp_bwd` | one cooperative launch whose grid barrier precedes the fixed-order `dweight` reduction.  It starts only when all its CTAs fit at once, so it waits for every kernel of another stream that occupies an SM |
 
 Every rank of a group passes the same `cooperative` value.  The form changes
 no collective, so a mismatch does not hang, but the ranks' `dweight` partials
 would then mix two reduction orders.
+
+The split grid is the same in every call on one device type: eager and in a
+CUDA Graph capture, at one rank and at more.  So `dweight` is reproducible and
+a replayed graph gives the eager bits.  From 0.2.22, sm_103a reserves 10 SMs
+instead of 1.  The backward exchange's communication kernel occupies CP + 1
+SMs (3 at CP2, 5 at CP4, 9 at CP8), so with one reserved SM some split CTAs of
+a rank whose exchange is still resident ran in a second wave, and the
+overlapped backward replayed from a graph had two speeds.  With 10 it has one
+speed (the measurements are in the comment at `SPLIT_RESERVE_SMS` in `kcp.py`).
+The sm_103a `dweight` bits therefore differ from 0.2.21; they are reproducible
+run to run as before.
 
 With `cooperative=False` at more than one rank the backward overlaps its halo
 exchange: the `kcp_bwd_split` program and its reduce program run while the
@@ -157,8 +168,17 @@ and its wait are unchanged, and one more program runs when the rank receives
 tail rows.  On sm_103a and sm_107a the multi entry overlaps only its first
 tensor this way and runs the other tensors' programs after the wait, so it
 also adds one program per call; on sm_100a, where this measured no gain, the
-multi entry waits first (`MULTI_BWD_OVERLAP_ARCHS`).  `cooperative=True` waits
-before its launch.
+multi entry waits first (`MULTI_BWD_OVERLAP_ARCHS`).  From 0.2.22, inside a
+CUDA Graph capture on sm_100a (`kcp.CAPTURE_WAIT_ARCHS`) a single call with
+at least `kcp.CAPTURE_WAIT_CHANNELS` (6144) channels and `C x S` of at least
+`kcp.CAPTURE_WAIT_ELEMS` (8192 x 16384) also waits for the exchange before its
+split program and runs no tail-row program: replayed, the overlapped backward
+had two speeds there and the waiting one has one speed and less time.  Calls
+with fewer channels or a smaller `C x S` keep the overlapped form in a capture,
+because the wait made their replayed backward slower (the comment at
+`CAPTURE_WAIT_ARCHS` in `kcp.py`).  The grid, `dx` and `dweight` are the same
+in both forms; eager calls still overlap.  `cooperative=True` waits before its
+launch.
 
 ### Two-launch forward
 
@@ -204,12 +224,13 @@ One `all_to_all_single` per direction and call:
   (`[n_hist_rows, C]` BF16).  `hist` is saved for the backward; the backward
   does not exchange it again.  When the single call's send rows are one run of
   consecutive rows of `x_local`, it sends that slice of `x_local` (no gather
-  copy).  A CUDA Graph capture of a call with `C x S` of at least
-  `CAPTURE_GATHER_ELEMS` (8192 x 16384) on sm_100a and sm_103a gathers them
-  instead.  On sm_103a the slice's shorter forward was measured to move the
-  checkpointed step's overlapped backward into its slow state.  sm_100a runs
-  the same overlapped backward and is included; the slice's effect was not
-  measured there (the comment at `CAPTURE_GATHER_ARCHS` in `kcp.py`).
+  copy), also in a CUDA Graph capture.  (0.2.20 and 0.2.21 gathered them in a
+  capture of a call with `C x S` of at least 8192 x 16384 on sm_100a and
+  sm_103a, to keep the replayed checkpointed step's overlapped backward out of
+  its slow state.  From 0.2.22 that backward has one speed there, the split
+  grid and the capture's waiting form above (with fewer than 6144 channels the
+  measured overlapped backward had one speed too), and the capture sends the
+  slice.)
 - Backward: the head program writes the FP32 derivative of each continuing
   fragment's first tokens (the halo adjoints; a token feeds at most three
   predecessor fragments) into the send layout; the exchange delivers them to

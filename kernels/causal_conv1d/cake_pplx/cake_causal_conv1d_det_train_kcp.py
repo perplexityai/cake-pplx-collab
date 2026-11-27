@@ -99,9 +99,10 @@ def cake_causal_conv1d_det_kcp(
     cooperative : bool, optional
         Keyword-only, default ``None`` (the package default,
         ``cake_pplx._backends.cake_causal_conv1d_det_train.kcp.COOPERATIVE_DEFAULT``, ``False``).  The launch
-        form of the backward's main kernel; the forward is the same either way.  ``False``: an ordinary launch one
-        SM short of the co-resident CTA count, then a fixed-order reduce kernel on the same stream; it starts beside
-        a small kernel of another stream (for example a communication kernel).  ``True``: one cooperative launch,
+        form of the backward's main kernel; the forward is the same either way.  ``False``: an ordinary launch a
+        few SMs short of the co-resident CTA count (10 on sm_103a, 1 elsewhere), then a fixed-order reduce kernel on
+        the same stream; it starts beside small kernels of other streams (for example a communication kernel) on
+        the SMs it leaves free.  ``True``: one cooperative launch,
         which starts only when all its CTAs fit on the GPU at once, so it waits for any kernel of another stream
         that occupies an SM.  ``dx`` is bitwise the same in both forms.  ``dweight`` is reproducible and summed in
         plain FP32 words in each form, but its bits differ between the forms, so keep one form for runs whose

@@ -137,17 +137,20 @@ def test_host_trim_knob_is_validated() -> None:
 
 
 @pytest.mark.cpu_only
-def test_bwd_overlap_knob_is_validated() -> None:
+def test_bwd_overlap_knob_is_validated(monkeypatch) -> None:
     """``bwd_overlap`` (the overlapped backward): a private setter validated against ``BWD_OVERLAPS`` (1 shipped = the
     split program before the exchange's wait and the tail-row program after it, 0 = the wait before the main
     program), independent of the other knobs; ``_overlapped`` holds only for the split form with an exchange in flight
     under the shipped value, and a non-shipped value is part of the backward's graph-key variant."""
     assert conv_kcp.BWD_OVERLAPS == (0, 1) and conv_kcp.BWD_OVERLAP_DEFAULT == 1
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
     work = object()
+    big = (10240, 32768)
     try:
-        assert conv_kcp._overlapped(False, work) is True
-        assert conv_kcp._overlapped(True, work) is False
-        assert conv_kcp._overlapped(False, None) is False
+        for arch in ("sm_100a", "sm_103a", "sm_107a"):
+            assert conv_kcp._overlapped(False, work, arch, *big) is True
+            assert conv_kcp._overlapped(True, work, arch, *big) is False
+            assert conv_kcp._overlapped(False, None, arch, *big) is False
         assert conv_kcp._bwd_variant(False) is False
         assert conv_kcp._bwd_variant(True) is True
         assert conv_kcp._set_test_knobs({"bwd_overlap": 0}) == {
@@ -157,7 +160,8 @@ def test_bwd_overlap_knob_is_validated() -> None:
             "fwd_main": None,
             "fwd_overlap": None,
         }
-        assert conv_kcp._overlapped(False, work) is False
+        for arch in ("sm_100a", "sm_103a", "sm_107a"):
+            assert conv_kcp._overlapped(False, work, arch, *big) is False
         assert conv_kcp._bwd_variant(False) == (False, ("bwd_overlap", 0))
         for bad in ({"bwd_overlap": 2}, {"bwd_overlap": True}, {"bwd_overlap": "1"}):
             with pytest.raises(ValueError):
@@ -165,6 +169,53 @@ def test_bwd_overlap_knob_is_validated() -> None:
     finally:
         conv_kcp._set_test_knobs(None)
     assert conv_kcp._TEST_KNOBS["bwd_overlap"] == 1
+
+
+@pytest.mark.cpu_only
+def test_capture_waits_on_sm100a(monkeypatch) -> None:
+    """``CAPTURE_WAIT_ARCHS``, ``CAPTURE_WAIT_CHANNELS`` and ``CAPTURE_WAIT_ELEMS``: inside a CUDA Graph capture the
+    single call's split backward takes the waiting form on sm_100a only, and only when it has at least 6144 channels
+    and its ``C x S`` is at least 8192 x 16384; a call with fewer channels or a smaller ``C x S``, a call outside a
+    capture, and a call in a capture on sm_103a and sm_107a overlap.  The cooperative form, a call without an exchange
+    and the ``bwd_overlap`` knob ``0`` wait in and out of a capture, and the graph-key variant does not depend on the
+    capture.  The multi entry's architectures are unchanged."""
+    assert conv_kcp.CAPTURE_WAIT_ARCHS == frozenset(("sm_100a",))
+    assert conv_kcp.CAPTURE_WAIT_CHANNELS == 6144
+    assert conv_kcp.CAPTURE_WAIT_ELEMS == 8192 * 16384
+    assert conv_kcp.MULTI_BWD_OVERLAP_ARCHS == frozenset(("sm_103a", "sm_107a"))
+    work = object()
+    limit = conv_kcp.CAPTURE_WAIT_ELEMS
+    shapes = (
+        (512, 4096),
+        (4096, 16384),
+        (8192, limit // 8192 - 1),
+        (8192, limit // 8192),
+        (4096, 32768),
+        (6143, 32768),
+        (6144, limit // 6144),
+        (6144, limit // 6144 + 1),
+        (6144, 32768),
+        (10240, 32768),
+    )
+    for capturing in (False, True):
+        monkeypatch.setattr(
+            torch.cuda, "is_current_stream_capturing", lambda _c=capturing: _c
+        )
+        for arch in ("sm_100a", "sm_103a", "sm_107a"):
+            for C, S in shapes:
+                wait = capturing and arch == "sm_100a" and C >= 6144 and C * S >= limit
+                got = conv_kcp._overlapped(False, work, arch, C, S)
+                assert got is (not wait), (capturing, arch, C, S)
+                assert conv_kcp._overlapped(True, work, arch, C, S) is False
+                assert conv_kcp._overlapped(False, None, arch, C, S) is False
+        assert conv_kcp._bwd_variant(False) is False
+        try:
+            conv_kcp._set_test_knobs({"bwd_overlap": 0})
+            for arch in ("sm_100a", "sm_103a", "sm_107a"):
+                for C, S in shapes:
+                    assert conv_kcp._overlapped(False, work, arch, C, S) is False
+        finally:
+            conv_kcp._set_test_knobs(None)
 
 
 ARCHES = ("sm_100a", "sm_103a", "sm_107a")
@@ -502,8 +553,7 @@ def test_forward_send_slice_and_waiting_exchange(monkeypatch) -> None:
     rows, as long as the device table (``_send_slice``); the slice holds the gather's rows in the gather's order; the
     waiting form outside a CUDA Graph capture issues the collective with ``async_op=False`` and gets no work handle,
     the overlapped form and a capture keep ``async_op=True`` and the handle (``_fwd_sync``, ``_exchange``); a CUDA
-    Graph capture of a large call on sm_100a and sm_103a gathers instead of sending the slice (``_capture_gather``).
-    No kernel runs here."""
+    Graph capture sends the slice too, on every architecture and shape.  No kernel runs here."""
 
     def ctx_of(rows, world=2):
         halo = types.SimpleNamespace(hist_index=tuple(rows))
@@ -542,21 +592,18 @@ def test_forward_send_slice_and_waiting_exchange(monkeypatch) -> None:
     empty = conv_kcp._fwd_gather(x, 8, {"hist_index": table(())}, view=True)
     assert empty.shape == (0, 8)
 
-    # a CUDA Graph capture of a large call on sm_100a / sm_103a gathers (``_capture_gather_rule``, ``_capture_gather``)
-    rule = conv_kcp._capture_gather_rule
-    assert conv_kcp.CAPTURE_GATHER_ELEMS == 8192 * 16384
-    assert conv_kcp.CAPTURE_GATHER_ARCHS == frozenset(("sm_100a", "sm_103a"))
-    assert rule("sm_103a", 8192, 16384) and rule("sm_100a", 10240, 32768)
-    assert not rule("sm_103a", 8192, 16383) and not rule("sm_103a", 1024, 16384)
-    assert not rule("sm_107a", 10240, 32768) and not rule("sm_120a", 10240, 32768)
-    e_cap = {**e, "capture_gather": True}
+    # a CUDA Graph capture sends the slice too (0.2.20 and 0.2.21 gathered in a capture of a large call on sm_100a
+    # and sm_103a); the host has no capture rule for the send rows any more
+    for gone in (
+        "CAPTURE_GATHER_ARCHS",
+        "CAPTURE_GATHER_ELEMS",
+        "_capture_gather",
+        "_capture_gather_rule",
+    ):
+        assert not hasattr(conv_kcp, gone), gone
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
-    cap = conv_kcp._fwd_gather(x, 8, e_cap, view=True)
-    assert cap.data_ptr() != x[7].data_ptr() and torch.equal(cap, gathered)
-    small = conv_kcp._fwd_gather(x, 8, {**e, "capture_gather": False}, view=True)
-    assert small.data_ptr() == x[7].data_ptr()
-    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
-    assert conv_kcp._fwd_gather(x, 8, e_cap, view=True).data_ptr() == x[7].data_ptr()
+    cap = conv_kcp._fwd_gather(x, 8, e, view=True)
+    assert cap.data_ptr() == x[7].data_ptr() and torch.equal(cap, gathered)
 
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
     assert conv_kcp._fwd_sync({"overlap": False}) is True
