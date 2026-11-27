@@ -3627,16 +3627,21 @@ STRIDED_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
 # 1.0085 for 48 and 64 heads at 600, more below), so each cut lies just below
 # the first point where every form passed (whose 64 heads, 599.78 rows per SM
 # on 148 SMs and 629.89 on 152, run ``fwd_layout_pipe``).  Version 0.2.19 ends
-# the sm_103a band at 619 rows per SM (629 in 0.2.18): measured against 0.2.18
-# on GB300 (CUDA Graph replays, CUPTI, cold L2, two runs; the same forms), every
-# form passed from 619.79 to 628.95 rows per SM (in both runs the forward faster
-# than 0.2.18's, no op slower than 0.2.18's beyond noise and the forward no
-# slower than the deterministic package's), while 64 heads failed at 609.68 and
-# 16 and 48 heads at 600, so the cut lies just below the first point where every
-# form passed; the release measurement of 0.2.19 against 0.2.18 on GB300 (the
-# comment of ``SLICED_FORWARD_BANDS``; the same forms) found every form passing
-# from 619.05 to 628.95 rows per SM.  Past the last pipelined band the plain
-# forward runs.  Host plan only, as the other tables.
+# the sm_103a band at 624 rows per SM (629 in 0.2.18).  Measured against 0.2.18
+# on GB300 (CUDA Graph replays, CUPTI, cold L2, two runs; the same forms),
+# every form passed from 619.79 to 628.95 rows per SM (in both runs the forward
+# faster than 0.2.18's, no op slower than 0.2.18's beyond noise and the forward
+# no slower than the deterministic package's), while 64 heads failed at 609.68
+# and 16 and 48 heads at 600.  The release measurement of 0.2.19 against 0.2.18
+# on GB300 (the comment of ``SLICED_FORWARD_BANDS``; the same forms) found
+# every form passing from 619.05 to 628.95 rows per SM, and a second release
+# measurement (the same protocol, with ``fwd_layout_pipe`` from 620 rows per SM
+# here and every other table as it is now) found the checkpointed step of 64
+# heads at 619.79 rows per SM 1.0049 of 0.2.18's time with a BF16 weight
+# gradient; both found every form passing from 624.84 (64 heads) and 624.95 (16
+# and 48 heads) to 628.95 rows per SM, so the cut lies just below the first
+# point where every form passed in both.  Past the last pipelined band the
+# plain forward runs.  Host plan only, as the other tables.
 PROJECTION_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
     "sm_100a": (
         (12, "fwd_short"),
@@ -3650,7 +3655,7 @@ PROJECTION_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
     "sm_103a": (
         (12, "fwd_short"),
         (250, "fwd_mid"),
-        (619, "fwd_xlong"),
+        (624, "fwd_xlong"),
         (2000, "fwd_layout_pipe"),
         (None, "fwd"),
     ),
