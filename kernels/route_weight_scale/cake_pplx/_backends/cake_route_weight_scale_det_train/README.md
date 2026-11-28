@@ -47,7 +47,7 @@ dx, dw = cake_route_weight_scale_det_train_backward(x, dy, w, dx=dx_buffer[:rows
 | Workspace | 0 bytes: the forward allocates only `y`, the backward only `dx` and `dw` (none when passed in) |
 | Retained state | The autograd function saves `x` and `w` only |
 | Empty input | `rows = 0`: empty outputs, no launch, no library load |
-| Programs | Eight records (`cake_jit.MODULES`): `fwd_h4096`, `fwd_h4096_t32`, `fwd_h3584`, `fwd_h4096_flat`, `fwd_h3584_flat`, `bwd_h4096`, `bwd_h3584`, `bwd_h3584_warp`, each built for the three architectures |
+| Programs | Nine records (`cake_jit.MODULES`): `fwd_h4096`, `fwd_h4096_t32`, `fwd_h3584`, `fwd_h4096_flat`, `fwd_h3584_flat`, `bwd_h4096`, `bwd_h3584`, `bwd_h4096_warp`, `bwd_h3584_warp`, each built for the three architectures |
 | Minimum CUDA | The `min_cuda` of each library in `build.json`; an older local toolkit raises `RuntimeError` when the library is built |
 
 A violation of the operand rules is a `ValueError` (a non-tensor operand a
@@ -67,13 +67,18 @@ Five kinds of program:
 
 | Records | CTA | Work a CTA (`rows_per_cta` or `elements_per_cta`) | Taken for |
 |---|---|---|---|
-| `fwd_h4096`, `fwd_h3584` | 128 threads, one warp a row | 4 consecutive rows | `fwd_h3584`: the forward at `H = 3584` below the band of `fwd_h3584_flat`; no band takes `fwd_h4096` (the tests' reference) |
-| `fwd_h4096_t32` | 32 threads | 1 row | the forward at `H = 4096` below the band of `fwd_h4096_flat` |
-| `fwd_h4096_flat`, `fwd_h3584_flat` | 128 threads, two loads of 8 elements a thread | 2048 consecutive elements | the forward in its band of `cake_jit.ROUTES` (many rows) |
-| `bwd_h4096`, `bwd_h3584` | 4 warps (128 threads) | 1 row | the backward (at `H = 3584` outside the band of `bwd_h3584_warp`), on a grid of at most 8 CTAs per SM while a call's rows fit in L2 (`cake_jit.ROUTES`) |
-| `bwd_h3584_warp` | 128 threads, one warp a row | 4 consecutive rows | the backward at `H = 3584` in its band of `cake_jit.ROUTES` |
+| `fwd_h4096`, `fwd_h3584` | 128 threads, one warp a row | 4 consecutive rows | `fwd_h3584`: the forward at `H = 3584` below the band of `fwd_h3584_flat` (SM107: at every row count); no band takes `fwd_h4096` (the tests' reference) |
+| `fwd_h4096_t32` | 32 threads | 1 row | the forward at `H = 4096` below the band of `fwd_h4096_flat` (SM107: at every row count) |
+| `fwd_h4096_flat`, `fwd_h3584_flat` | 128 threads, two loads of 8 elements a thread | 2048 consecutive elements | the forward in its band of `cake_jit.ROUTES` (many rows; SM100 and SM103) |
+| `bwd_h4096`, `bwd_h3584` | 4 warps (128 threads) | 1 row | the backward outside the bands of the one-warp programs, on a grid of at most 8 CTAs per SM while a call's rows fit in L2 |
+| `bwd_h4096_warp`, `bwd_h3584_warp` | 128 threads, one warp a row | 4 consecutive rows | the backward in its bands: `bwd_h3584_warp` in one band on SM100 and SM103; on SM107 from 3200 (`H = 4096`) or 3136 (`H = 3584`) rows to 5088 (`H = 4096`) or 5936 (`H = 3584`) rows, one whole wave of their CTAs on the 212 SMs of VR200, and from 24576 (`H = 4096`) or 8192 (`H = 3584`) rows on |
 
-`cake_jit.route(stage, H, rows)` picks the record and the grid cap.  The
+`cake_jit.route(stage, H, rows, arch)` picks the record and the grid cap from
+the route table of the device's architecture, `cake_jit.routes(arch)`:
+`cake_jit.ROUTES` on SM100 and SM103 (measured on B200 and GB300), the SM107
+table of `cake_jit.ARCH_ROUTES` on SM107 (measured on VR200).  Every record of
+one stage and width stores the same bits, so a route table changes only the
+speed.  The
 forward multiplies each pair of elements by the row's weight in FP32 and
 rounds the pair to BF16; `fwd_h4096_t32` and the flat programs run the
 per-element instructions of `fwd_h<H>`, so they store the same bits.  A flat
@@ -87,9 +92,10 @@ product.  Each of its four warps sums one run of each lane's loads
 lane, to static shared memory (1 KiB a CTA).  After a CTA barrier, warp 0
 joins the four roots pairwise in the same order, adds the even and odd halves
 and makes the five XOR shuffles across its 32 lanes.  So `dw` is summed in
-the order of Numerics, bit for bit.  In `bwd_h3584_warp` each lane sums its
-14 loads in the same order and the warp makes the five XOR shuffles, so it
-stores the same `dx` and `dw` bits as `bwd_h3584`.  Each stage and width
+the order of Numerics, bit for bit.  In `bwd_h4096_warp` and `bwd_h3584_warp`
+each lane sums its 16 or 14 loads in the same order and the warp makes the
+five XOR shuffles, so they store the same `dx` and `dw` bits as `bwd_h4096`
+and `bwd_h3584`.  Each stage and width
 gives the same bits at every row count.
 
 Every program strides over its blocks with a 32-bit block counter.  A grid of
@@ -98,7 +104,7 @@ Every program strides over its blocks with a 32-bit block counter.  A grid of
 host launches
 `min(nblocks, 2**31 - nblocks)` CTAs (`cake_jit.grid`): `nblocks` up to
 `2**30` blocks.  Below the row bound `2**29` a flat program has fewer than
-`2**30` blocks.  In a band of `cake_jit.ROUTES` with a cap, the host launches
+`2**30` blocks.  In a band of the route table with a cap, the host launches
 at most that many CTAs per SM of the device: a persistent grid, each CTA
 striding over several rows, with the same bits.  Every row offset is 64-bit.
 

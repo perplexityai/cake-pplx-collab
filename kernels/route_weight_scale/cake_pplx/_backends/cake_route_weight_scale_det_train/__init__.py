@@ -40,16 +40,24 @@ Host design:
   launches nothing.  The checks read metadata only: nothing reads tensor
   contents, nothing synchronizes.
 - Launches.  One kernel per call, of the record and grid cap
-  ``cake_jit.route`` picks from the band of ``cake_jit.ROUTES`` that holds
-  ``rows``, for stage ``fwd`` or ``bwd`` at the width of ``x``
-  (``<stage>_h<H>``): the forward at H = 4096 takes ``fwd_h4096_t32`` (one
-  row a CTA of 32 threads) for few rows, the forward of each width takes its
-  flat program (``fwd_h<H>_flat``) for many rows, the backward at H = 3584
-  takes ``bwd_h3584_warp`` (one warp a row) in its band, all with the same
-  bits.  The grid is the record's (``cake_jit.grid``): one CTA per block of
-  its ``rows_per_cta`` rows (4 for ``fwd_h4096``, ``fwd_h3584`` and
-  ``bwd_h3584_warp``, 1 for ``fwd_h4096_t32``, ``bwd_h4096`` and
-  ``bwd_h3584``), or for a flat record one CTA per chunk of its
+  ``cake_jit.route`` picks from the band that holds ``rows`` in the route
+  table of the device's architecture (``cake_jit.routes``: ``ROUTES`` on
+  SM100 and SM103, the SM107 table of ``ARCH_ROUTES`` on SM107), for stage
+  ``fwd`` or ``bwd`` at the width of ``x`` (``<stage>_h<H>``).  On SM100 and
+  SM103 the forward at H = 4096 takes ``fwd_h4096_t32`` (one row a CTA of 32
+  threads) for few rows, the forward of each width takes its flat program
+  (``fwd_h<H>_flat``) for many rows, the backward at H = 3584 takes
+  ``bwd_h3584_warp`` (one warp a row) in its band.  On SM107 the forward
+  takes ``fwd_h4096_t32`` or ``fwd_h3584`` at every row count and the
+  backward of each width takes ``bwd_h<H>_warp`` in two bands, from 3200
+  (H = 4096) or 3136 (H = 3584) rows to 5088 (H = 4096) or 5936 (H = 3584)
+  rows, one whole wave of its CTAs on the 212 SMs of VR200, and from 24576
+  (H = 4096) or 8192 (H = 3584) rows on.
+  All give the same bits.  The grid is the record's
+  (``cake_jit.grid``): one CTA per block of its ``rows_per_cta`` rows (4 for
+  ``fwd_h4096``, ``fwd_h3584``, ``bwd_h4096_warp`` and ``bwd_h3584_warp``, 1
+  for ``fwd_h4096_t32``, ``bwd_h4096`` and ``bwd_h3584``), or for a flat
+  record one CTA per chunk of its
   ``elements_per_cta`` (2048) elements, capped in a band with a cap at that
   many CTAs per SM of the device (a persistent grid).  ``rows`` and the
   strides are launch arguments, so one library per record and architecture
@@ -130,7 +138,7 @@ def _arch_of_index(device_index: int) -> Optional[str]:
 
 @functools.cache
 def _sm_count(device_index: int) -> int:
-    """The SM count of one CUDA device, read once per device index (the grid cap of ``cake_jit.ROUTES``)."""
+    """The SM count of one CUDA device, read once per device index (the grid cap of a band of ``cake_jit.routes``)."""
     return int(torch.cuda.get_device_properties(device_index).multi_processor_count)
 
 
@@ -223,14 +231,15 @@ _ENTRIES: dict[tuple[str, int], Any] = {}
 
 def _launch(stage: str, width: int, device_index: int, rows: int, *arguments: Any) -> None:
     """Launch the program of ``stage`` at hidden size ``width`` on device ``device_index`` for ``rows >= 1`` rows: the
-    record and grid cap ``cake_jit.route(stage, width, rows)``, with ``arguments`` (the kernel parameters in the order
-    of :data:`_PARAMETERS`) and then that record's grid ``cake_jit.grid(rows, name, ctas_per_sm, sm_count)`` for the
-    device's SM count.  The one place a kernel is launched."""
-    name, ctas_per_sm = cake_jit.route(stage, width, rows)
+    record and grid cap ``cake_jit.route(stage, width, rows, arch)`` of the device's architecture, with ``arguments``
+    (the kernel parameters in the order of :data:`_PARAMETERS`) and then that record's grid ``cake_jit.grid(rows, name,
+    ctas_per_sm, sm_count)`` for the device's SM count.  The one place a kernel is launched."""
+    arch = device_arch(device_index)
+    name, ctas_per_sm = cake_jit.route(stage, width, rows, arch)
     key = (name, device_index)
     entry = _ENTRIES.get(key)
     if entry is None:
-        entry = _ENTRIES[key] = _entry(name, device_arch(device_index))
+        entry = _ENTRIES[key] = _entry(name, arch)
     entry(*arguments, *cake_jit.grid(rows, name, ctas_per_sm, _sm_count(device_index)))
 
 
