@@ -243,18 +243,34 @@ on a register scan or whose tail is `tail_g3`: the fix does not reach those
 routes.  A zero gradient that the caller gives counts as a gradient.
 `PV_TF32 = False` turns the rule off.
 
-Some calls on the `pv_tf32` programs miss the BF16 naive tier on `dv` or
-`dg`, and the 0.2.8 programs miss it on the same calls.  On B200, GB300 and
-R200 these are:
+In 0.2.11 the `pv_tf32` scan also writes the low BF16 word of its FP32 `dv2`
+beside the BF16 tape (`dv2_lo`), and the tail, or after `dqkwg` the WY
+pullback (`wy_bwd_dvlo`), adds it on the diagonal before the `beta` scale, so
+`dv` and `dbeta` of these calls take other bits than in 0.2.10 and every other
+output keeps its 0.2.10 bits.
 
-- with an initial state and a final-state gradient, the `(2, 6)` pack of
-  131,071 + 87,531 + 43,385 tokens, the `(2, 6)` pack of 11,000 + 12,000 +
-  9,768 tokens and the `(4, 16)` pack of four 4,096-token sequences (one
-  wave, `G = 4`): the max-norm error of `dv` meets the tier on 13 of 32
-  draws, where 16 are needed (0.2.8: 13, 8 and 14 of 32, in that order);
-- the split forward at `G = 3` with the serial or the `(64, 1)` tcgen05
-  adjoint: the max-norm error of `dv` meets the tier on 12 of 32 draws
-  (0.2.8: 11 of 32);
+A call with a final-state gradient costs more time in 0.2.11 than in 0.2.10.
+Of 204 timed rows, the table counts those that ran slower than 0.2.10 beyond
+the noise band (none ran faster) and gives the median and the largest ratio
+of the 0.2.11 time to the 0.2.10 time over all 204.  The rows cover both
+packages: 13 layouts with an FP32 `beta` and 4 of them with a BF16 `beta`,
+each with decays log-spaced per value head, an initial state and a
+final-state gradient, under the backward, the forward + backward and the
+checkpointed step, eager and in a CUDA graph (CUPTI GPU time with a cold L2,
+both versions interleaved in each of 12 fresh processes per row).  The
+example is this package's backward in a CUDA graph over 131,071 + 87,531 +
+43,385 tokens at `H = 2`, `HV = 6` with an FP32 `beta`.
+
+| GPU | rows slower | median ratio | largest ratio | example: 0.2.10 / 0.2.11 |
+|---|---|---|---|---|
+| B200 (`sm_100a`) | 159 of 204 | 1.025 | 1.057 | 2.9128 / 3.0204 ms |
+| GB300 (`sm_103a`) | 150 of 204 | 1.023 | 1.052 | 2.6584 / 2.7575 ms |
+| R200 (`sm_107a`) | 175 of 204 | 1.015 | 1.037 | 1.9217 / 1.9643 ms |
+
+Some calls on the `pv_tf32` programs miss the BF16 naive tier on `dg`, and
+the 0.2.8 programs miss it on the same calls.  On B200, GB300 and R200 these
+are:
+
 - the `(64, 1)` split adjoint on the tcgen05 pass 2 at `G = 3`: the largest
   L2 error of `dg` is 1.092 times the tier's (0.2.8: 1.028 to 1.032 times).
   This largest error is about 6 % above that of 0.2.8, and the median is
@@ -262,10 +278,14 @@ R200 these are:
 - the two-stream split adjoint at `G = 2`: the largest L2 error of `dg` is
   1.015 to 1.016 times the tier's (0.2.8: 1.016 to 1.019 times).
 
-The last three hold with or without an initial state.  The tests reach these
-routes with plan pins or a patched planner on small layouts.  A call that the
-fix does not reach keeps the 0.2.8 programs, bits and accuracy, including the
-misses of 0.2.8.
+Both hold with or without an initial state.  On the small layout of 300, 77
+and 640 tokens at `G = 3` under a `finalize` pin (the `dqkwg` tail and the WY
+pullback) with an FP32 `beta`, an initial state and a final-state gradient,
+the max-norm error of the forward output `o` meets the tier on 14 of 32
+draws; 0.2.10 gives the same bits.  The tests reach these routes with plan
+pins or a patched planner on small layouts.  A call that the fix does not
+reach keeps the 0.2.8 programs, bits and accuracy, including the misses of
+0.2.8.
 
 In 0.2.8 the segment maps of a split pass 2 at `G = 3` on `dhu_tc2_dvl32` come
 from `dhu_tc2_dvl32_gm` or `dhu_tc2_dvl32_gm2` (above), where 0.2.3 to 0.2.7
@@ -331,6 +351,11 @@ In 0.2.5 `wy_a` and `fwd_ho_a` are built from newer kernel source under the
 same program names: in `wy_a` each compute warp owns the ring slots of its
 parity, and `fwd_ho_a` loads the row scales of `beta v` and `beta 2^g kn` in
 batches.  Routes, launch records and output bits are those of 0.2.4.
+
+In 0.2.11 `wy_a`, `fwd_ho`, `fwd_ho_vh2` (on every architecture) and
+`fwd_fused` are built from newer kernel source under the same program names:
+they add memory-ordering fences (`fence.proxy.async.shared::cta`).  Routes,
+launch records and output bits are those of 0.2.10.
 
 The route is chosen from shapes, dtypes, the architecture, the SM count and the
 pins, never from an address or a value: a Q, K or V that a kernel cannot read
@@ -500,8 +525,8 @@ per-stream ones.
 - Head dimension 128 and chunk 64 only; `q`, `k`, `v` BF16.
 - No context parallelism and no cross-rank state passing.
 - `sm_100a`, `sm_103a` and `sm_107a` only (`sm_107a` with CUDA 13.5 or newer).
-- Some calls with a final-state gradient miss the BF16 naive tier on `dv` or
-  `dg`; Chain lists them.
+- Some calls with a final-state gradient miss the BF16 naive tier on `dg`,
+  and one small layout on the max-norm error of `o`; Chain lists them.
 
 ## Names
 

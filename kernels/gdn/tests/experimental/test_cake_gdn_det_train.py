@@ -745,14 +745,17 @@ def _with_dht(stages, heads, beta_dtype, seq_lens, finalize=None) -> list[str]:
     """``stages`` as a backward with a final-state gradient launches them on this device, with ``PV_TF32`` and the
     switches as they are set: where they hold the tcgen05 adjoint scan of ``heads`` (:func:`_tc2`), that scan and the
     tail of the layout (:func:`_device_tail`; dqkwg for the unfused tail) named by their pv_tf32 twins
-    (:func:`cake_chain.pv_tf32_stages`); every other stage as given, and every stage of a register scan or of a route
-    without a pv_tf32 pair."""
+    (:func:`cake_chain.pv_tf32_stages`), and the unfused tail's WY pullback by its dv_lo twin
+    (:data:`cake_chain.DV_LO_WY`); every other stage as given, and every stage of a register scan or of a route without
+    a pv_tf32 pair."""
     scan = _tc2(heads)
     tail = _device_tail(heads, beta_dtype, seq_lens, finalize) or "dqkwg"
     pv = cake_chain.pv_tf32_stages(_current_arch(), scan, tail)
     if pv is None or scan not in stages:
         return list(stages)
     twins = dict(zip((scan, tail), pv))
+    if tail == "dqkwg":
+        twins.update(cake_chain.DV_LO_WY)
     return [twins.get(stage, stage) for stage in stages]
 
 
@@ -928,7 +931,7 @@ FWD_A_RECORDS = ("wy_a", "fwd_ho_a", "fwd_fused", "fwd_summary", "fwd_summary_a"
 
 
 def test_registry_records_are_well_formed() -> None:
-    assert len(cake_jit.STAGES) == 58 and len(set(cake_jit.STAGES)) == 58
+    assert len(cake_jit.STAGES) == 60 and len(set(cake_jit.STAGES)) == 60
     assert set(FWD_A_RECORDS) <= set(cake_jit.STAGES)
     assert set(cake_chain.LAUNCH_ARGS) == set(cake_jit.STAGES)
     for arch in ARCHES:
@@ -11082,10 +11085,11 @@ def _pv_or_skip() -> None:
     arch = _current_arch()
     if arch not in cake_chain.PV_TF32_ARCHS:
         pytest.skip(f"PV_TF32 runs on {cake_chain.PV_TF32_ARCHS}, not {arch}")
-    stages = (*cake_chain.PV_TF32_SCANS.values(), *cake_chain.PV_TF32_TAILS.values())
+    stages = (*cake_chain.PV_TF32_SCANS.values(), *cake_chain.PV_TF32_TAILS.values(),
+              *cake_chain.DV_LO_WY.values())  # fmt: skip
     missing = [stage for stage in stages if not cake_chain._available(stage, arch)]
     if missing:
-        pytest.skip(f"this build has no pv_tf32 record for {missing}")
+        pytest.skip(f"this build has no pv_tf32 or dv_lo record for {missing}")
 
 
 def _same_bits(a: dict, b: dict, names) -> None:
@@ -11150,7 +11154,11 @@ def test_pv_tf32_runs_only_for_a_final_state_gradient(
     heads, seq_lens = FWD_A_CASES[case]
     inputs = _inputs(seq_lens, heads, torch.float32, device, seed=41)
     stages = _record_launches(monkeypatch)
-    swap = {**cake_chain.PV_TF32_SCANS, **cake_chain.PV_TF32_TAILS}
+    swap = {
+        **cake_chain.PV_TF32_SCANS,
+        **cake_chain.PV_TF32_TAILS,
+        **cake_chain.DV_LO_WY,
+    }
     for kind, (_h0, _final, grad) in PV_CALLS.items():
         runs, launched = {}, {}
         for flag in (False, True):
@@ -11239,7 +11247,9 @@ def test_pv_tf32_choice_does_not_leak_across_calls(device, monkeypatch) -> None:
 def test_pv_tf32_tables_pair_every_scan_with_its_tails() -> None:
     # On by default on every architecture of the package: each pv_tf32 stage is a stage of the registry with
     # one record per architecture, and its call site is its sibling's with the FP32 dg state operands inserted (the
-    # scan's h, v_new, hdh32_out, e_out after dh_out; the tail's hdh32, e32 after dh)
+    # scan's h, v_new, hdh32_out, e_out after dh_out; the tail's hdh32, e32 after dh) and, but on dqkwg_pv_tf32, dv2's
+    # low word dv2_lo after dv2; the unfused tail's WY pullbacks have dv_lo twins (DV_LO_WY), their sibling's call site
+    # with du_lo after du
     assert cake_chain.PV_TF32 is True and cake_chain.PV_TF32_ARCHS == ARCHES
     pairs = {**cake_chain.PV_TF32_SCANS, **cake_chain.PV_TF32_TAILS}
     assert set(pairs.values()) == {s for s in cake_jit.STAGES if s.endswith("_pv_tf32")}
@@ -11253,13 +11263,30 @@ def test_pv_tf32_tables_pair_every_scan_with_its_tails() -> None:
         after = "dh_out" if base in cake_chain.PV_TF32_SCANS else "dh"
         args = cake_chain.LAUNCH_ARGS[base]
         i = args.index(after) + 1
-        assert cake_chain.LAUNCH_ARGS[pv] == (*args[:i], *extra, *args[i:]), pv
+        args = (*args[:i], *extra, *args[i:])
+        if pv != "dqkwg_pv_tf32":
+            i = args.index("dv2") + 1
+            args = (*args[:i], "dv2_lo", *args[i:])
+        assert cake_chain.LAUNCH_ARGS[pv] == args, pv
         for arch in ARCHES:
             assert cake_chain._available(pv, arch), (pv, arch)
     assert (
         "tail_g3" not in cake_chain.PV_TF32_TAILS
         and "tail_g2_bf16_wavefront" not in cake_chain.PV_TF32_TAILS
     )
+    assert cake_chain.DV_LO_WY == {
+        "wy_bwd": "wy_bwd_dvlo",
+        "wy_bwd_bf16": "wy_bwd_bf16_dvlo",
+    }
+    assert set(cake_chain.DV_LO_WY.values()) == {
+        s for s in cake_jit.STAGES if s.endswith("_dvlo")
+    }
+    for base, lo in cake_chain.DV_LO_WY.items():
+        args = cake_chain.LAUNCH_ARGS[base]
+        i = args.index("du") + 1
+        assert cake_chain.LAUNCH_ARGS[lo] == (*args[:i], "du_lo", *args[i:]), lo
+        for arch in ARCHES:
+            assert cake_chain._available(lo, arch), (lo, arch)
 
 
 def test_pv_tf32_stages_fall_back_to_the_other_programs(monkeypatch) -> None:
@@ -11284,5 +11311,113 @@ def test_pv_tf32_stages_fall_back_to_the_other_programs(monkeypatch) -> None:
             cake_chain.pv_tf32_stages(arch, "dhu_tc2_wavefront", "tail_g2_bf16") is None
         )
     assert cake_chain.pv_tf32_stages("sm_90a", "dhu_tc2", "tail_g2") is None
+    # the unfused tail needs the WY pullbacks that read dv2's low word too
+    with monkeypatch.context() as m:
+        m.setitem(cake_chain.DV_LO_WY, "wy_bwd", "wy_bwd_undelivered")
+        assert cake_chain.pv_tf32_stages(ARCHES[0], "dhu_tc2_dvl32", "dqkwg") is None
+        assert cake_chain.pv_tf32_stages(ARCHES[0], "dhu_tc2_dvl32", "tail") is not None
     monkeypatch.setattr(cake_chain, "PV_TF32", False)
     assert cake_chain.pv_tf32_stages(ARCHES[0], "dhu_tc2", "tail_g2") is None
+
+
+# --------------------------------------------------------------------------- dv2's low word on every tape launch
+# A call with a final-state gradient on a pv_tf32 route passes dv2's low word (b_dv2_lo) right after dv2 to every
+# launch that writes the dv2 tape (the pv_tf32 scan) and to every launch that reads it (the pv_tf32 tail, or the
+# unfused tail's WY pullback as ``du_lo``; dqkwg_pv_tf32 reads dv2's BF16 word alone).  The cases (heads, layout,
+# pins): the serial tcgen05 scan beside the round-once tail of a group of three, the split pass 2 on it (beside the
+# gm maps), the unfused tail under a finalize pin, tail_g2 at a group of two and the package tail at a group of one.
+LO_PAIR_CASES = {
+    "g3-serial": ((2, 6), ROUND_ONCE_LAYOUT, ROUND_ONCE_PINS["serial-tc"]),
+    "g3-split": ((2, 6), ROUND_ONCE_LAYOUT, ROUND_ONCE_PINS["split-tc"]),
+    "g3-finalize": (
+        (2, 6),
+        ROUND_ONCE_LAYOUT,
+        {**ROUND_ONCE_PINS["serial-tc"], "finalize": "finalize"},
+    ),
+    "g2-serial": ((2, 4), ROUND_ONCE_LAYOUT, ROUND_ONCE_PINS["serial-tc"]),
+    "g1-serial": ((2, 2), ROUND_ONCE_LAYOUT, ROUND_ONCE_PINS["serial-tc"]),
+}
+
+
+def _lo_stages() -> set[str]:
+    """The stages whose records take dv2's low word: the pv_tf32 scans and tails but dqkwg_pv_tf32 (``dv2_lo``) and
+    the WY pullbacks of DV_LO_WY (``du_lo``)."""
+    pv = {*cake_chain.PV_TF32_SCANS.values(), *cake_chain.PV_TF32_TAILS.values()}
+    return (pv - {"dqkwg_pv_tf32"}) | set(cake_chain.DV_LO_WY.values())
+
+
+def _lo_launches(launches) -> list[tuple[str, torch.Tensor, torch.Tensor]]:
+    """``(stage, low word, its tape)`` (dv2_lo and dv2, or du_lo and du) of every launch of :func:`_lo_stages` in
+    ``launches``, in order; every launch's record takes the low word exactly when its stage is one of them."""
+    arch = _current_arch()
+    out = []
+    for stage, values in launches:
+        names = cake_backend.parameters(cake_backend.stage_record(stage, arch))
+        word = [name for name in ("dv2_lo", "du_lo") if name in names]
+        assert bool(word) == (stage in _lo_stages()), (stage, names)
+        if word:
+            tape = word[0].removesuffix("_lo")
+            out.append((stage, values[names.index(word[0])], values[names.index(tape)]))
+    return out
+
+
+@pytest.mark.parametrize("case", sorted(LO_PAIR_CASES))
+def test_dv_lo_rides_every_launch_of_the_dv2_tape(case, device, monkeypatch) -> None:
+    # A call with a final-state gradient: the pv_tf32 scan launches (the first of them first) and the launches that
+    # read the dv2 tape take one BF16 tensor of dv2's shape as the low word (not dv2 itself); no other launch from
+    # the scan on takes it.  A call without a final-state gradient, or with PV_TF32 off, launches no stage that takes
+    # it.
+    _pv_or_skip()
+    heads, seq_lens, pins = LO_PAIR_CASES[case]
+    arch = _current_arch()
+    tail = _device_tail(heads, torch.float32, seq_lens, pins.get("finalize")) or "dqkwg"
+    pv = cake_chain.pv_tf32_stages(arch, _tc2(heads), tail)
+    assert pv is not None, (arch, heads, tail)
+    inputs = _inputs(seq_lens, heads, torch.float32, device, seed=47)
+    h0, dht = _state_pair(seq_lens, heads, device, 48)
+    launches = _record_launch_values(monkeypatch)
+    _run(inputs, seq_lens, initial_state=h0, output_final_state=True, dht=dht, **pins)
+    lo = _lo_launches(launches)
+    stages = [stage for stage, _values in launches]
+    reader = cake_chain.DV_LO_WY["wy_bwd"] if tail == "dqkwg" else pv[1]
+    assert lo and lo[0][0] == pv[0], stages
+    assert {stage for stage, *_x in lo} == {pv[0], reader}, stages
+    assert pv[1] in stages, stages
+    word = lo[0][1]
+    assert word.dtype == torch.bfloat16 and word.is_contiguous(), word.dtype
+    for stage, value, tape in lo:
+        assert value.data_ptr() == word.data_ptr() and value.shape == tape.shape, stage
+        assert value.data_ptr() != tape.data_ptr(), stage
+    for stage, values in launches[stages.index(pv[0]) :]:
+        if stage not in _lo_stages():
+            tensors = [x for x in values if isinstance(x, torch.Tensor)]
+            assert all(x.data_ptr() != word.data_ptr() for x in tensors), stage
+    for label, flag, given in (("no-dht", True, None), ("off", False, dht)):
+        with monkeypatch.context() as m:
+            m.setattr(cake_chain, "PV_TF32", flag)
+            launches.clear()
+            _run(inputs, seq_lens, initial_state=h0, output_final_state=True, dht=given, **pins)  # fmt: skip
+            assert not _lo_launches(launches), (label, [s for s, _v in launches])
+
+
+def test_dv_lo_twins_are_their_base_records_with_the_low_word() -> None:
+    # The records that take dv2's low word: each pv_tf32 record but dqkwg_pv_tf32 has dv2_lo right after dv2 in its
+    # arg plan, its other parameters as before; each WY pullback of DV_LO_WY is its sibling's record with du_lo right
+    # after du (the same launch, the same architectures, a program of its own); no other record takes either
+    for name, rec in cake_jit.MODULES.items():
+        plan = [arg[1] for arg in rec["arg_plan"]]
+        lo = rec["stage"] in _lo_stages()
+        assert ("dv2_lo" in plan or "du_lo" in plan) is lo, name
+        if rec["stage"].endswith("_pv_tf32") and lo:
+            assert plan[plan.index("dv2") + 1] == "dv2_lo", name
+    for base, twin in cake_chain.DV_LO_WY.items():
+        for arch in ARCHES:
+            rec = cake_jit.MODULES[cake_backend.stage_record(twin, arch)]
+            sib = cake_jit.MODULES[cake_backend.stage_record(base, arch)]
+            plan = [arg for arg in rec["arg_plan"] if arg != ["buffer", "du_lo"]]
+            assert plan == sib["arg_plan"], (twin, arch)
+            i = rec["arg_plan"].index(["buffer", "du"])
+            assert rec["arg_plan"][i + 1] == ["buffer", "du_lo"], (twin, arch)
+            assert (
+                rec["launch"] == sib["launch"] and rec["library"] != sib["library"]
+            ), (twin, arch)

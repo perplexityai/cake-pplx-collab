@@ -338,34 +338,75 @@ one-wave table that the split route cannot take keeps the 0.2.8 programs: the
 fix does not reach those routes.  A zero gradient that the caller gives counts
 as a gradient.  `PV_TF32 = False` turns the rule off.
 
-Some calls on the `pv_tf32` programs miss the BF16 naive tier on `dv` or
-`dg`, and the 0.2.8 programs miss it on the same calls.  On B200, GB300 and
-R200 these are:
+In 0.2.11 the `pv_tf32` scan also writes the low BF16 word of its FP32 `dv2`
+beside the BF16 tape (`dv2_lo`), and the tail adds it on the diagonal before
+the `beta` scale, so `dv` and `dbeta` of these calls take other bits than in
+0.2.10 and every other output keeps its 0.2.10 bits.  A one-wave table that
+the split route cannot take now runs the one-wave walk and its package,
+`tail_g2_f32x` or `tail_g3_f32x` tail in the builds that write and add that
+word (`dhu_tc2_dvl32_modes_dvlo` and the `_dvlo` tails, `MODES_DV_LO`), with
+the same effect on the bits.  `PV_TF32 = False` keeps the 0.2.8 programs on
+every call, this route included.
 
-- with an initial state and a final-state gradient, the `(2, 6)` pack of
-  11,000 + 12,000 + 9,768 tokens and the `(4, 16)` pack of four 4,096-token
-  sequences (one wave, `G = 4`), and on R200 also the `(2, 6)` pack of
-  131,071 + 87,531 + 43,385 tokens: the max-norm error of `dv` meets the tier
-  on 13 of 32 draws, where 16 are needed (0.2.8: 8, 14 and 13 of 32, in that
-  order).  On B200 and GB300 the 131,071-token call keeps the 0.2.8 programs
-  and misses `dv` with them;
+A call with a final-state gradient costs more time in 0.2.11 than in 0.2.10.
+Of 204 timed rows, the table counts those that ran slower than 0.2.10 beyond
+the noise band (none ran faster) and gives the median and the largest ratio
+of the 0.2.11 time to the 0.2.10 time over all 204.  The rows cover both
+packages: 13 layouts with an FP32 `beta` and 4 of them with a BF16 `beta`,
+each with decays log-spaced per value head, an initial state and a
+final-state gradient, under the backward, the forward + backward and the
+checkpointed step, eager and in a CUDA graph (CUPTI GPU time with a cold L2,
+both versions interleaved in each of 12 fresh processes per row).  The
+example is this package's backward in a CUDA graph over 131,071 + 87,531 +
+43,385 tokens at `H = 2`, `HV = 6` with an FP32 `beta`.
+
+| GPU | rows slower | median ratio | largest ratio | example: 0.2.10 / 0.2.11 |
+|---|---|---|---|---|
+| B200 (`sm_100a`) | 159 of 204 | 1.025 | 1.057 | 2.4760 / 2.6172 ms |
+| GB300 (`sm_103a`) | 150 of 204 | 1.023 | 1.052 | 2.2888 / 2.3731 ms |
+| R200 (`sm_107a`) | 175 of 204 | 1.015 | 1.037 | 2.3726 / 2.4243 ms |
+
+Some calls on the `pv_tf32` programs or on the `MODES_DV_LO` route miss the
+BF16 naive tier, and the 0.2.8 programs miss it on the same calls.  On B200,
+GB300 and R200 these are:
+
 - the split forward at `G = 2` with the `(64, 1)` tcgen05 adjoint: the
   largest L2 error of `dg` is 1.007 to 1.008 times the tier's (0.2.8: 1.040
   times);
-- the package tail run in segments at `G = 3` with the tcgen05 adjoint: the
-  largest L2 error of `dv` is 1.016 times the tier's (0.2.8: 1.14 times).  Its
-  largest max-norm error is 1.2 % above that of 0.2.8;
 - the serial tcgen05 adjoint on two streams at `G = 2`: the largest L2 error
-  of `dg` is 1.23 times the tier's (0.2.8: 1.28 times).
+  of `dg` is 1.23 times the tier's (0.2.8: 1.28 times);
+- the `MODES_DV_LO` route with an FP32 `beta` at `G = 1` (the package tail):
+  the largest L2 error of `dv` is 1.028 times the tier's (0.2.10, which runs
+  the 0.2.8 programs on this route: 1.169 times);
+- the `MODES_DV_LO` route with an FP32 `beta` at `G = 2` to `4`: `dg`, with
+  its 0.2.10 bits.  Its largest L2 error is 1.033 to 1.034 times the tier's
+  at `G = 2` and 1.094 to 1.095 times at `G = 3`; at `G = 4` its median L2
+  error is 1.011 times the tier's;
+- on B200 and GB300, the `MODES_DV_LO` route under M-share with an FP32
+  `beta`: `dg`, with its 0.2.10 bits.  At `G = 2` its largest L2 error is
+  1.070 (B200) and 1.132 (GB300) times the tier's, and on GB300 its median L2
+  error is 1.015 times the tier's and its max-norm error meets the tier on 15
+  of 32 draws; at `G = 3` its largest L2 error is 1.177 (B200) and 1.196
+  (GB300) times the tier's.
 
-The last three hold with or without an initial state.  The tests reach these
-routes with plan pins or a patched planner on small layouts.  A call that the
-fix does not reach keeps the 0.2.8 programs, bits and accuracy, including the
-misses of 0.2.8.
+All hold with or without an initial state.  On the small layout of the
+`MODES_DV_LO` items (700, 1,500 and 230 tokens) with an FP32 `beta` and a
+final-state gradient, the max-norm error of the forward output `o` meets the
+tier on 15 of 32 draws at `G = 2` without an initial state and on 14 of 32
+at `G = 4` with or without one; 0.2.10 gives the same bits.  The tests reach
+these routes with plan pins or a patched planner on small layouts.  A call
+that the fix does not reach keeps the 0.2.8 programs, bits and accuracy,
+including the misses of 0.2.8.
 
 In 0.2.5 `wy_a` is built from newer kernel source under the same program
 name: each compute warp owns the ring slots of its parity.  Routes, launch
 records and output bits are those of 0.2.4.
+
+In 0.2.11 `wy_a`, `fwd_ho`, `fwd_ho_vh2` (on every architecture), `fwd_fused`
+and `dhu_tc2_dvl32_gm` are built from newer kernel source under the same
+program names: the first four add memory-ordering fences
+(`fence.proxy.async.shared::cta`), and `dhu_tc2_dvl32_gm` reworks its warp
+vote.  Routes, launch records and output bits are those of 0.2.10.
 
 On the shapes of the speed table below, `sm_100a` (B200, GB200) and `sm_103a`
 (GB300) run the split forward on `fwd_ho_a` on the three `(2, 6)` packs and
@@ -751,5 +792,7 @@ span rises by 0.17-0.21 ms.
 - Head dimension 128 and chunk 64 only; `q`, `k`, `v` BF16.
 - No context parallelism and no cross-rank state passing.
 - `sm_100a`, `sm_103a` and `sm_107a` only (`sm_107a` with CUDA 13.5 or newer).
-- Some calls with a final-state gradient miss the BF16 naive tier on `dv` or
-  `dg`; Chain lists them.
+- Some calls with a final-state gradient miss the BF16 naive tier on `dg`,
+  one route on `dv` (`MODES_DV_LO` at `G = 1` with an FP32 `beta`: the
+  largest L2 error is 1.028 times the tier's; 0.2.10: 1.169 times) and two
+  calls of one small layout on the max-norm error of `o`; Chain lists them.

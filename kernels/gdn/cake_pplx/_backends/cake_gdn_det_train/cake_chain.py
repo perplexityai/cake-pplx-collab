@@ -418,6 +418,23 @@ LAUNCH_ARGS.update(
         "tail_bf16_pv_tf32": _TAIL_WS_PV_ARGS + ("v_row_heads",),
     }
 )
+# The low word of dv2 (see the pv_tf32 section): every pv_tf32 scan also writes ``dv2_lo`` [T, HV, 128] right after
+# ``dv2`` (its FP32 dv2 minus the BF16 word of the tape, rounded to BF16) and every pv_tf32 tail but dqkwg_pv_tf32
+# reads it right after ``dv2``; the WY pullback behind dqkwg_pv_tf32 reads it as ``du_lo`` right after ``du`` (stages
+# of their own, the stage + ``_dvlo``: DV_LO_WY).
+LAUNCH_ARGS.update(
+    {
+        stage: _with_after(LAUNCH_ARGS[stage], "dv2", ("dv2_lo",))
+        for stage in LAUNCH_ARGS
+        if stage.endswith("_pv_tf32") and stage != "dqkwg_pv_tf32"
+    }
+)
+LAUNCH_ARGS.update(
+    {
+        "wy_bwd_dvlo": _with_after(LAUNCH_ARGS["wy_bwd"], "du", ("du_lo",)),
+        "wy_bwd_bf16_dvlo": _with_after(LAUNCH_ARGS["wy_bwd_bf16"], "du", ("du_lo",)),
+    }
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -5108,7 +5125,12 @@ def _tail_segments(
 # (no state, an initial state alone, a final state that receives no gradient) keeps the 0.2.8 programs and bits, and
 # so does a call whose route has no pv_tf32 pair (pv_tf32_stages): a register scan, the wavefront pair or tail_g3
 # (such a call keeps the 0.2.8 accuracy as well).  A pv_tf32 call never takes the wavefront pair.  The selection rules
-# still price the 0.2.8 scan.  PV_TF32 off: every call keeps the 0.2.8 programs.
+# still price the 0.2.8 scan.  The pv_tf32 scan also writes the low BF16 word of dv2 (``dv2_lo``, workspace
+# ``b_dv2_lo``: the FP32 dv2 minus its BF16 word, rounded to BF16; its rows are written wherever the dv2 tape is) and
+# its tail adds it on the diagonal of A^T du (A[i][i] = 1) before the beta scale and the dbeta sum; the unfused tail
+# reads it in the WY pullback (DV_LO_WY, after dqkwg_pv_tf32).  So the diagonal term of dv and dbeta reads dv2 as
+# two BF16 words instead of one; dq, dk, dg, dh0 and the final state keep the bits of the programs without that word.
+# PV_TF32 off: every call keeps the 0.2.8 programs.
 PV_TF32: bool = True
 PV_TF32_ARCHS: tuple[str, ...] = ("sm_100a", "sm_103a", "sm_107a")
 PV_TF32_SCANS: dict[str, str] = {
@@ -5124,13 +5146,15 @@ PV_TF32_TAILS: dict[str, str] = {
     "tail": "tail_pv_tf32",
     "tail_bf16": "tail_bf16_pv_tf32",
 }
+# the WY pullbacks that read dv2's low word (``du_lo``), behind dqkwg_pv_tf32 on the unfused tail of a pv_tf32 call
+DV_LO_WY: dict[str, str] = {"wy_bwd": "wy_bwd_dvlo", "wy_bwd_bf16": "wy_bwd_bf16_dvlo"}
 
 
 def pv_tf32_stages(arch: str, scan: str | None, tail: str) -> tuple[str, str] | None:
     """The pv_tf32 ``(scan, tail)`` stages of a backward on ``arch`` whose dh / dv2 come from the tcgen05 adjoint scan
     ``scan`` (``None``: another scan) and whose tail stage is ``tail`` (``dqkwg`` for the unfused tail); ``None`` when
-    :data:`PV_TF32` is off, ``arch`` is not in ``PV_TF32_ARCHS`` or the scan or the tail has no pv_tf32 record there
-    (the call keeps the 0.2.8 programs)."""
+    :data:`PV_TF32` is off, ``arch`` is not in ``PV_TF32_ARCHS`` or the scan or the tail has no pv_tf32 record there,
+    nor, for the unfused tail, the WY pullbacks of :data:`DV_LO_WY` (the call keeps the 0.2.8 programs)."""
     if not PV_TF32 or arch not in PV_TF32_ARCHS or scan is None:
         return None
     pv_scan, pv_tail = PV_TF32_SCANS.get(scan), PV_TF32_TAILS.get(tail)
@@ -5138,6 +5162,10 @@ def pv_tf32_stages(arch: str, scan: str | None, tail: str) -> tuple[str, str] | 
         pv_scan is None
         or pv_tail is None
         or not (_available(pv_scan, arch) and _available(pv_tail, arch))
+        or (
+            tail == "dqkwg"
+            and not all(_available(wy, arch) for wy in DV_LO_WY.values())
+        )
     ):
         return None
     return pv_scan, pv_tail
@@ -5361,9 +5389,12 @@ def cake_gdn_det_train_backward(
     hdh32 = e32 = None
     scan_x: tuple = ()
     tail_x: tuple = ()
+    lo_x: tuple = ()
     if pv is not None:
         # the pv_tf32 scan's extra operands after dh_out (h, v_new, hdh32, e) and the tail's after dh (hdh32, e32; a
-        # chunk range reads its rows of hdh32 and the whole e)
+        # chunk range reads its rows of hdh32 and the whole e); dv2's low word after dv2 on every launch that writes
+        # or reads the dv2 tape (the scan, the tail, or the WY pullback of the unfused tail; never zero filled: the
+        # scan writes every row a tail reads)
         hdh32 = workspaces.take(
             table, "b_hdh32", (meta.num_chunks, num_v_heads, 2), torch.float32, device
         )
@@ -5371,12 +5402,13 @@ def cake_gdn_det_train_backward(
             table, "b_e32", (total_tokens, num_v_heads), torch.float32, device
         )
         scan_x, tail_x = (h, v_new, hdh32, e32), (hdh32, e32)
+        lo_x = (workspaces.take(table, "b_dv2_lo", token_hv, v.dtype, device),)
     if use_tc and groups is None and not wavefront:
         # dv_local fused into the tcgen05 serial scan (seg_state is not read): on dhu_tc2 the register scan's dh / dv2 /
         # dh0; dhu_tc2_dvl32 rounds dv2 once (other dh / dv2 / dh0 bits)
-        _launch(tc_stage, segs.num_segments, num_v_heads, 1, qn, kn, w, do, g_cs, dht32, dh, *scan_x, dv2, dh0, dh0,
-                meta.chunk_start, meta.chunk_len, segs.seg_chunk_start, segs.seg_seq, meta.seq_chunk_start, num_heads,
-                num_v_heads, use_dht, 1 if has_initial_state else 0, scale)  # fmt: skip
+        _launch(tc_stage, segs.num_segments, num_v_heads, 1, qn, kn, w, do, g_cs, dht32, dh, *scan_x, dv2, *lo_x, dh0,
+                dh0, meta.chunk_start, meta.chunk_len, segs.seg_chunk_start, segs.seg_seq, meta.seq_chunk_start,
+                num_heads, num_v_heads, use_dht, 1 if has_initial_state else 0, scale)  # fmt: skip
     elif segs.segment_len > 0 and segs.num_segments > meta.num_seqs:
         # (the refusals above checked the pre-scan, the stitch and the segment length)
         seg_state = workspaces.take(table, "b_seg_state", (segs.num_segments, num_v_heads, HEAD_DIM, 2 * HEAD_DIM),
@@ -5422,9 +5454,9 @@ def cake_gdn_det_train_backward(
     if split_tc and groups is None and not wavefront:
         # pass 2 on the tcgen05 scan: segment ``seg`` starts from dht[seg], the stitched dh_end[seg]; the first segment
         # of a sequence stores its dh0 (the register pass 2's contract)
-        _launch(tc_stage, segs.num_segments, num_v_heads, 1, qn, kn, w, do, g_cs, dht32, dh, *scan_x, dv2, dh0, dh0,
-                meta.chunk_start, meta.chunk_len, segs.seg_chunk_start, segs.seg_seq, meta.seq_chunk_start, num_heads,
-                num_v_heads, use_dht, 1 if has_initial_state else 0, scale)  # fmt: skip
+        _launch(tc_stage, segs.num_segments, num_v_heads, 1, qn, kn, w, do, g_cs, dht32, dh, *scan_x, dv2, *lo_x, dh0,
+                dh0, meta.chunk_start, meta.chunk_len, segs.seg_chunk_start, segs.seg_seq, meta.seq_chunk_start,
+                num_heads, num_v_heads, use_dht, 1 if has_initial_state else 0, scale)  # fmt: skip
     elif not (use_tc or split_tc):
         _launch(scan_stage, segs.num_segments, num_v_heads, HEAD_DIM // vb, qn, kn, w, do, dv_local, g_cs, dht32, dh,
                 dv2, dh0, dh0, meta.chunk_start, meta.chunk_len, segs.seg_chunk_start, segs.seg_seq,
@@ -5444,9 +5476,9 @@ def cake_gdn_det_train_backward(
 
             def dhu_tc2(s0, s1):
                 _launch(tc_stage, s1 - s0, num_v_heads, 1, qn, kn, w, do, g_cs, dht32[s0:s1] if use_dht else dht32,
-                        dh, *scan_x, dv2, dh0, dh0, meta.chunk_start, meta.chunk_len, segs.seg_chunk_start[s0:s1 + 1],
-                        segs.seg_seq[s0:s1], meta.seq_chunk_start, num_heads, num_v_heads, use_dht,
-                        1 if has_initial_state else 0, scale)  # fmt: skip
+                        dh, *scan_x, dv2, *lo_x, dh0, dh0, meta.chunk_start, meta.chunk_len,
+                        segs.seg_chunk_start[s0:s1 + 1], segs.seg_seq[s0:s1], meta.seq_chunk_start, num_heads,
+                        num_v_heads, use_dht, 1 if has_initial_state else 0, scale)  # fmt: skip
 
             dhu_tc2(0, na)
         stride = None
@@ -5524,12 +5556,12 @@ def cake_gdn_det_train_backward(
                     x_r = () if pv is None else (hdh32[a:b], e32)
                 h_r, dh_r, cs_r, cl_r = rows
                 _launch(tail, (b - a) * num_v_heads, 1, 1, qn, kn, forward["rstd_q"], forward["rstd_k"], v_new, do,
-                        dv2, h_r, dh_r, *x_r, g_cs, v, A, beta32, dq, dk, dg, dv, dbeta, ws, ws_count, cs_r, cl_r,
-                        num_heads, num_v_heads, scale, normalize, tiles, v_rows)  # fmt: skip
+                        dv2, *lo_x, h_r, dh_r, *x_r, g_cs, v, A, beta32, dq, dk, dg, dv, dbeta, ws, ws_count, cs_r,
+                        cl_r, num_heads, num_v_heads, scale, normalize, tiles, v_rows)  # fmt: skip
         elif groups is None:
             _launch(tail, meta.num_chunks * num_v_heads, 1, 1, qn, kn, forward["rstd_q"], forward["rstd_k"], v_new, do,
-                    dv2, h, dh, *tail_x, g_cs, v, A, beta32, dq, dk, dg, dv, dbeta, meta.chunk_start, meta.chunk_len,
-                    num_heads, num_v_heads, scale, normalize, *strides)  # fmt: skip
+                    dv2, *lo_x, h, dh, *tail_x, g_cs, v, A, beta32, dq, dk, dg, dv, dbeta, meta.chunk_start,
+                    meta.chunk_len, num_heads, num_v_heads, scale, normalize, *strides)  # fmt: skip
         else:
             # R form: the caller's stream has run the tcgen05 adjoint scan (tc_stage) of group A (the full rounds,
             # launched above); it runs the tail of A while the side stream runs the scan of group B (the partial
@@ -5537,9 +5569,9 @@ def cake_gdn_det_train_backward(
 
             def tail_chunks(c0, c1):
                 _launch(tail, (c1 - c0) * num_v_heads, 1, 1, qn, kn, forward["rstd_q"], forward["rstd_k"], v_new, do,
-                        dv2, h[c0:c1], dh[c0:c1], *(() if pv is None else (hdh32[c0:c1], e32)), g_cs, v, A, beta32,
-                        dq, dk, dg, dv, dbeta, meta.chunk_start[c0:c1], meta.chunk_len[c0:c1], num_heads, num_v_heads,
-                        scale, normalize, *strides)  # fmt: skip
+                        dv2, *lo_x, h[c0:c1], dh[c0:c1], *(() if pv is None else (hdh32[c0:c1], e32)), g_cs, v, A,
+                        beta32, dq, dk, dg, dv, dbeta, meta.chunk_start[c0:c1], meta.chunk_len[c0:c1], num_heads,
+                        num_v_heads, scale, normalize, *strides)  # fmt: skip
 
             main = torch.cuda.current_stream(index)
             side = _side_stream(index, main)
@@ -5570,8 +5602,10 @@ def cake_gdn_det_train_backward(
     dg2 = workspaces.take(
         table, "b_dg2", (total_tokens, num_v_heads), torch.float32, device
     )
-    _launch("wy_bwd_bf16" if dbeta_bf16 else "wy_bwd", meta.num_chunks, num_v_heads, 1, kn, v, A, dw, dv2, g_cs,
-            beta32, dk2, dv, dbeta, dg2, meta.chunk_start, meta.chunk_len, num_heads, num_v_heads, v_rows)  # fmt: skip
+    # the WY pullback; after dqkwg_pv_tf32 its DV_LO_WY twin, which reads dv2's low word
+    wy = "wy_bwd_bf16" if dbeta_bf16 else "wy_bwd"
+    _launch(DV_LO_WY[wy] if lo_x else wy, meta.num_chunks, num_v_heads, 1, kn, v, A, dw, dv2, *lo_x, g_cs, beta32, dk2,
+            dv, dbeta, dg2, meta.chunk_start, meta.chunk_len, num_heads, num_v_heads, v_rows)  # fmt: skip
     dq = torch.empty(qn.shape, dtype=qn.dtype, device=device)
     dk = torch.empty(kn.shape, dtype=kn.dtype, device=device)
     dg = torch.empty(

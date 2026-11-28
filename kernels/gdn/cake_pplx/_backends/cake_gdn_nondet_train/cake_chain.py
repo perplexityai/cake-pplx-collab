@@ -418,6 +418,31 @@ LAUNCH_ARGS.update(
         "tail_g3_f32x_bf16_pv_tf32": _TAIL_F32X_PV_ARGS,
     }
 )
+# The low word of dv2 (see the pv_tf32 section): every pv_tf32 scan and the one-wave split's dvlo walk
+# (dhu_tc2_dvl32_modes_dvlo) also write ``dv2_lo`` [T, HV, 128] right after ``dv2`` (their FP32 dv2 minus the BF16
+# word of the tape, rounded to BF16), and every pv_tf32 tail and every dvlo tail (MODES_DV_LO_TAILS) reads it right
+# after ``dv2``.  The dvlo records serve stages of their own (the stage + ``_dvlo``).
+LAUNCH_ARGS.update(
+    {
+        stage: _with_after(LAUNCH_ARGS[stage], "dv2", ("dv2_lo",))
+        for stage in LAUNCH_ARGS
+        if stage.endswith("_pv_tf32")
+    }
+)
+LAUNCH_ARGS.update(
+    {
+        f"{stage}_dvlo": _with_after(LAUNCH_ARGS[stage], "dv2", ("dv2_lo",))
+        for stage in (
+            "dhu_tc2_dvl32_modes",
+            "tail_g2_f32x",
+            "tail_g2_f32x_bf16",
+            "tail_g3_f32x",
+            "tail_g3_f32x_bf16",
+            "tail",
+            "tail_bf16",
+        )
+    }
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -1790,13 +1815,19 @@ def sdt_prescan(arch: str) -> str:
 # workspaces ``b_hdh32`` / ``b_e32`` between them (the scan writes every element the tail reads).  These calls get dv
 # and dg within the BF16 naive tier where the 0.2.8 programs miss it; their programs cost more time.  A call planned
 # on the one-wave adjoint split (whose forms have no pv_tf32 build) runs its table's split route instead: the
-# pre-scan, the stitch and the pv_tf32 walk as pass 2 (:func:`_pv_tf32_split_route`).  Every other call (no state, an
-# initial state alone, a final state that receives no gradient) keeps the 0.2.8 programs and bits, and so does a call
-# whose route has no pv_tf32 pair (pv_tf32_stages): a register scan, an unfused or pinned tail form, or a one-wave
-# table that route cannot take (such a call keeps the 0.2.8 accuracy as well).  The selection rules still price the
-# 0.2.8 scan.  The flag is a module global of the backward, so a recorded backward plan replays only under the value
-# it was recorded with (:func:`_plan_globals`); a call with a final-state gradient neither records nor replays a plan,
-# so a plan never holds the pv_tf32 programs.  PV_TF32 off: every call keeps the 0.2.8 programs.
+# pre-scan, the stitch and the pv_tf32 walk as pass 2 (:func:`_pv_tf32_split_route`); a one-wave table that route
+# cannot take keeps the split and runs its walk and tail as their dvlo builds (:func:`modes_dv_lo_stages`), or the
+# 0.2.8 programs where its tail has none.  Every other call (no state, an initial state alone, a final state that
+# receives no gradient) keeps the 0.2.8 programs and bits, and so does a call whose route has no pv_tf32 pair
+# (pv_tf32_stages): a register scan or an unfused or pinned tail form (such a call keeps the 0.2.8 accuracy as well).
+# The pv_tf32 scan and the dvlo walk also write the low BF16 word of dv2 (``dv2_lo``, workspace ``b_dv2_lo``: the FP32
+# dv2 minus its BF16 word, rounded to BF16, on every row of the dv2 tape) and their tails add it on the diagonal of
+# A^T du (A[i][i] = 1) before the beta scale and the dbeta sum: the diagonal term of dv and dbeta reads dv2 as two BF16
+# words instead of one, and dq, dk, dg, dh0 and the final state keep the bits of the programs without that word.  The
+# selection rules still price the 0.2.8 scan.  The flags are module globals of the backward, so a recorded backward
+# plan replays only under the values it was recorded with (:func:`_plan_globals`); a call with a final-state gradient
+# neither records nor replays a plan, so a plan never holds the pv_tf32 or dvlo programs.  PV_TF32 off: every call
+# keeps the 0.2.8 programs (MODES_DV_LO acts only with PV_TF32 on).
 PV_TF32: bool = True
 PV_TF32_ARCHS: tuple[str, ...] = ("sm_100a", "sm_103a", "sm_107a")
 PV_TF32_SCANS: dict[str, str] = {"dhu_tc2_dvl32": "dhu_tc2_dvl32_pv_tf32"}
@@ -1838,6 +1869,38 @@ def _pv_tf32_split_route(arch: str, segs) -> bool:
         and _available(sdt_prescan(arch), arch)
         and segs.segment_len <= pre_threads
     )
+
+
+# The one-wave split of a call with a final-state gradient whose table the pv_tf32 split route cannot take
+# (:func:`_pv_tf32_split_route`): with PV_TF32 and MODES_DV_LO on, every walk of the split (dhu_tc2_dvl32_modes) runs
+# as dhu_tc2_dvl32_modes_dvlo, which also writes dv2's low word on the rows of its tape entries, and the tail as its
+# MODES_DV_LO_TAILS twin, which adds that word; the summaries (dhu_tc2_dvl32_gm) and the composition write no tape and
+# stay.  The same pieces, launches and order as the 0.2.8 split.
+MODES_DV_LO: bool = True
+MODES_DV_LO_TAILS: dict[str, str] = {
+    "tail": "tail_dvlo",
+    "tail_bf16": "tail_bf16_dvlo",
+    "tail_g2_f32x": "tail_g2_f32x_dvlo",
+    "tail_g2_f32x_bf16": "tail_g2_f32x_bf16_dvlo",
+    "tail_g3_f32x": "tail_g3_f32x_dvlo",
+    "tail_g3_f32x_bf16": "tail_g3_f32x_bf16_dvlo",
+}
+MODES_DV_LO_WALK = "dhu_tc2_dvl32_modes_dvlo"
+
+
+def modes_dv_lo_stages(arch: str, tail: str) -> tuple[str, str] | None:
+    """The ``(walk, tail)`` stages of the one-wave split of a call with a final-state gradient on ``arch`` whose tail
+    stage is ``tail``: the dvlo walk and ``tail``'s dvlo twin; ``None`` when :data:`PV_TF32` or :data:`MODES_DV_LO` is
+    off, ``arch`` is not in ``PV_TF32_ARCHS`` or the walk or the tail has no dvlo record there (the call keeps the
+    0.2.8 programs)."""
+    if not (PV_TF32 and MODES_DV_LO) or arch not in PV_TF32_ARCHS:
+        return None
+    lo_tail = MODES_DV_LO_TAILS.get(tail)
+    if lo_tail is None or not (
+        _available(MODES_DV_LO_WALK, arch) and _available(lo_tail, arch)
+    ):
+        return None
+    return MODES_DV_LO_WALK, lo_tail
 
 
 @cache
@@ -5439,7 +5502,8 @@ def _replay_forward(plan: _ForwardPlan, inputs) -> dict[str, Any]:
 def _adjoint_split_walk(split1: AdjointSplit, segs: SegmentTable, meta: ChunkMeta, qn, kn, w, do, g_cs, dht32,
                         use_dht: int, dh, dv2, dh0, has_initial_state: bool, num_heads: int, num_v_heads: int,
                         scale: float, table, workspaces: Workspaces, index: int, device, ex=None,
-                        warmup_log2: float = WARMUP_THRESH_LOG2, m_share=None) -> None:  # fmt: skip
+                        warmup_log2: float = WARMUP_THRESH_LOG2, m_share=None, walk: str = "dhu_tc2_dvl32_modes",
+                        lo_x: tuple = ()) -> None:  # fmt: skip
     """The adjoint walk of a table's segments as the one-wave split (:class:`AdjointSplit`): the last pieces' walks
     from ``dht`` (``dhu_tc2_dvl32_modes``, caller's stream) beside, on a side stream joined back, the summaries of
     every piece but each sequence's first (``dhu_tc2_dvl32_gm`` under the warm-up bound at ``warmup_log2``, writing
@@ -5450,7 +5514,9 @@ def _adjoint_split_walk(split1: AdjointSplit, segs: SegmentTable, meta: ChunkMet
     one walk of every piece from its end adjoint on the caller's stream.  ``dh`` / ``dv2`` receive every chunk's tapes,
     ``dh0`` each sequence's start adjoint (with ``has_initial_state``).  ``ex``: the backward's executor
     (:data:`_DIRECT` when ``None``).  ``m_share``: the forward's segment state (M-share, :data:`M_SHARE_ARCHS`): where
-    the table has middle pieces and the stitch composes, :func:`_m_share_split_walk` instead (no summary)."""
+    the table has middle pieces and the stitch composes, :func:`_m_share_split_walk` instead (no summary).  ``walk``:
+    the stage of every walk (:func:`modes_dv_lo_stages`: dhu_tc2_dvl32_modes_dvlo, which takes ``lo_x``, dv2's low
+    word, right after ``dv2``)."""
     ex = ex or _DIRECT
     hv = num_v_heads
     if (
@@ -5460,7 +5526,8 @@ def _adjoint_split_walk(split1: AdjointSplit, segs: SegmentTable, meta: ChunkMet
         and _adjoint_chain_stage(cake_backend.device_arch(index)) == "stitch"
     ):
         _m_share_split_walk(split1, segs, meta, qn, kn, w, do, g_cs, dht32, use_dht, dh, dv2, dh0, has_initial_state,
-                            num_heads, hv, scale, table, workspaces, index, device, ex, m_share)  # fmt: skip
+                            num_heads, hv, scale, table, workspaces, index, device, ex, m_share, walk,
+                            lo_x)  # fmt: skip
         return
     store0 = 1 if has_initial_state else 0
     common = (meta.chunk_start, meta.chunk_len, segs.seg_chunk_start, segs.seg_seq, meta.seq_chunk_start, num_heads,
@@ -5469,8 +5536,8 @@ def _adjoint_split_walk(split1: AdjointSplit, segs: SegmentTable, meta: ChunkMet
                                 device)  # fmt: skip
     if not split1.num_summary:
         # every sequence is one piece: its walk from dht is the whole adjoint walk
-        ex.launch("dhu_tc2_dvl32_modes", split1.num_walk, hv, 1, qn, kn, w, do, g_cs, dht32, dh, dv2, dh0, seg_state,
-                  *common, use_dht, store0, scale, split1.walk[0], split1.walk[1])  # fmt: skip
+        ex.launch(walk, split1.num_walk, hv, 1, qn, kn, w, do, g_cs, dht32, dh, dv2, *lo_x, dh0, seg_state, *common,
+                  use_dht, store0, scale, split1.walk[0], split1.walk[1])  # fmt: skip
         return
     seg_flag = workspaces.take(
         table, "b_seg_flag", (segs.num_segments, hv), torch.int32, device
@@ -5484,14 +5551,13 @@ def _adjoint_split_walk(split1: AdjointSplit, segs: SegmentTable, meta: ChunkMet
     )
 
     def bound(stage, entries, count, dht, use_final, store_initial, *tail):
-        return ex.bind(stage, count, hv, 1, qn, kn, w, do, g_cs, dht, dh, dv2, dh0, seg_state, *common, use_final,
-                       store_initial, scale, entries[0], entries[1], *tail)  # fmt: skip
+        # dv2's low word after dv2 for the walks alone (the summaries write no tape)
+        return ex.bind(stage, count, hv, 1, qn, kn, w, do, g_cs, dht, dh, dv2, *(lo_x if stage == walk else ()), dh0,
+                       seg_state, *common, use_final, store_initial, scale, entries[0], entries[1], *tail)  # fmt: skip
 
     summaries = bound("dhu_tc2_dvl32_gm", split1.summary, split1.num_summary, dht32, 0, 0, float(warmup_log2),
                       seg_flag)  # fmt: skip
-    walks = bound(
-        "dhu_tc2_dvl32_modes", split1.walk, split1.num_walk, dht32, use_dht, store0
-    )
+    walks = bound(walk, split1.walk, split1.num_walk, dht32, use_dht, store0)
     if _adjoint_chain_stage(cake_backend.device_arch(index)) == "piece_chain":
         compose = ex.bind("piece_chain", meta.num_seqs, hv, CHAIN_VSPLIT, seg_state, dht32, dh_end,
                           segs.seq_seg_start, seg_flag, hv, use_dht)  # fmt: skip
@@ -5503,13 +5569,9 @@ def _adjoint_split_walk(split1: AdjointSplit, segs: SegmentTable, meta: ChunkMet
         # from dht) and one walk of every piece, all on the caller's stream
         summaries()
         compose()
-        bound(
-            "dhu_tc2_dvl32_modes", split1.every, split1.num_every, dh_end, 1, store0
-        )()
+        bound(walk, split1.every, split1.num_every, dh_end, 1, store0)()
         return
-    fronts = bound(
-        "dhu_tc2_dvl32_modes", split1.front, split1.num_front, dh_end, 1, store0
-    )
+    fronts = bound(walk, split1.front, split1.num_front, dh_end, 1, store0)
     if split1.one_stream:
         summaries()
         walks()
@@ -5530,15 +5592,15 @@ def _adjoint_split_walk(split1: AdjointSplit, segs: SegmentTable, meta: ChunkMet
 
 def _m_share_split_walk(split1: AdjointSplit, segs: SegmentTable, meta: ChunkMeta, qn, kn, w, do, g_cs, dht32,
                         use_dht: int, dh, dv2, dh0, has_initial_state: bool, num_heads: int, num_v_heads: int,
-                        scale: float, table, workspaces: Workspaces, index: int, device, ex,
-                        m_share) -> None:  # fmt: skip
+                        scale: float, table, workspaces: Workspaces, index: int, device, ex, m_share,
+                        walk: str = "dhu_tc2_dvl32_modes", lo_x: tuple = ()) -> None:  # fmt: skip
     """The split walk under M-share (:data:`M_SHARE_ARCHS`): wave 1, the last pieces' walks from ``dht``
     (``ms_walk``: a split sequence's storing its start adjoint into the B half of ``m_share``) beside the middle
     pieces walked from zero for their B halves alone (``gonly``, side stream joined back, or both on the caller's
     stream with ``one_stream``; with :data:`M_SHARE_ONE_LAUNCH`, one launch of ``pass1``), into the forward's segment
     state beside the M halves its summary stored; ``stitch_mt`` composes the end adjoints with the host ``seg_flag``,
     reading those M halves transposed (the forward applies M, the adjoint its transpose); wave 2, the other pieces'
-    walks from them."""
+    walks from them.  ``walk`` / ``lo_x``: as :func:`_adjoint_split_walk`'s (every launch here is a walk)."""
     hv = num_v_heads
     seg_state = m_share
     store0 = 1 if has_initial_state else 0
@@ -5546,12 +5608,12 @@ def _m_share_split_walk(split1: AdjointSplit, segs: SegmentTable, meta: ChunkMet
               hv)  # fmt: skip
 
     def bound(stage, entries, count, dht, use_final, store_initial):
-        return ex.bind(stage, count, hv, 1, qn, kn, w, do, g_cs, dht, dh, dv2, dh0, seg_state, *common, use_final,
-                       store_initial, scale, entries[0], entries[1])  # fmt: skip
+        return ex.bind(stage, count, hv, 1, qn, kn, w, do, g_cs, dht, dh, dv2, *lo_x, dh0, seg_state, *common,
+                       use_final, store_initial, scale, entries[0], entries[1])  # fmt: skip
 
     if M_SHARE_ONE_LAUNCH:
         bound(
-            "dhu_tc2_dvl32_modes",
+            walk,
             split1.pass1,
             split1.num_walk + split1.num_gonly,
             dht32,
@@ -5559,11 +5621,9 @@ def _m_share_split_walk(split1: AdjointSplit, segs: SegmentTable, meta: ChunkMet
             store0,
         )()
     else:
-        summaries = bound(
-            "dhu_tc2_dvl32_modes", split1.gonly, split1.num_gonly, dht32, 0, 0
-        )
+        summaries = bound(walk, split1.gonly, split1.num_gonly, dht32, 0, 0)
         walks = bound(
-            "dhu_tc2_dvl32_modes",
+            walk,
             split1.ms_walk,
             split1.num_walk,
             dht32,
@@ -5587,7 +5647,7 @@ def _m_share_split_walk(split1: AdjointSplit, segs: SegmentTable, meta: ChunkMet
                              device)  # fmt: skip
     ex.launch("stitch_mt", meta.num_seqs, hv, STITCH_VSPLIT, seg_state, dht32, dh_end, segs.seq_seg_start,
               split1.seg_flag, hv, use_dht, 1)  # fmt: skip
-    bound("dhu_tc2_dvl32_modes", split1.front, split1.num_front, dh_end, 1, store0)()
+    bound(walk, split1.front, split1.num_front, dh_end, 1, store0)()
 
 
 def cake_gdn_nondet_train_backward(
@@ -5755,6 +5815,11 @@ def _backward_chain(
     hdh32 = e32 = None
     scan_x: tuple = ()
     tail_x: tuple = ()
+    # dv2's low word (the pv_tf32 section) after dv2 on every launch that writes or reads the dv2 tape: the pv_tf32 scan
+    # and tail, or the dvlo walks and tail of the one-wave split (modes_dv_lo_stages); never zero filled (the scan or
+    # the walks write every row a tail reads)
+    lo_x: tuple = ()
+    walk = "dhu_tc2_dvl32_modes"
     if pv is not None:
         tc_stage, tail_stage = pv
         hdh32 = workspaces.take(
@@ -5764,14 +5829,21 @@ def _backward_chain(
             table, "b_e32", (total_tokens, num_v_heads), torch.float32, device
         )
         scan_x, tail_x = (h, v_new, hdh32, e32), (hdh32, e32)
+        lo_x = (workspaces.take(table, "b_dv2_lo", token_hv, v.dtype, device),)
+    elif pv_call and split1 is not None:
+        lo = modes_dv_lo_stages(arch, tail_stage)
+        if lo is not None:
+            walk, tail_stage = lo
+            lo_x = (workspaces.take(table, "b_dv2_lo", token_hv, v.dtype, device),)
     if split1 is not None:
         _adjoint_split_walk(split1, segs, meta, qn, kn, w, do, g_cs, dht32, use_dht, dh, dv2, dh0, has_initial_state,
                             num_heads, num_v_heads, scale, table, workspaces, index, device, ex,
-                            warmup_thresh_log2(options), m_share=forward.get("m_share"))  # fmt: skip
+                            warmup_thresh_log2(options), m_share=forward.get("m_share"), walk=walk,
+                            lo_x=lo_x)  # fmt: skip
     elif use_tc and groups is None:
         # dv_local fused into the tcgen05 serial scan: the same dh / dv2 / dh0 (seg_state is not read)
-        ex.launch(tc_stage, segs.num_segments, num_v_heads, 1, qn, kn, w, do, g_cs, dht32, dh, *scan_x, dv2, dh0, dh0,
-                  meta.chunk_start, meta.chunk_len, segs.seg_chunk_start, segs.seg_seq, meta.seq_chunk_start,
+        ex.launch(tc_stage, segs.num_segments, num_v_heads, 1, qn, kn, w, do, g_cs, dht32, dh, *scan_x, dv2, *lo_x, dh0,
+                  dh0, meta.chunk_start, meta.chunk_len, segs.seg_chunk_start, segs.seg_seq, meta.seq_chunk_start,
                   num_heads, num_v_heads, use_dht, 1 if has_initial_state else 0, scale)  # fmt: skip
     elif segs.segment_len > 0 and segs.num_segments > meta.num_seqs:
         if pre is None or not _available("stitch", arch):
@@ -5805,8 +5877,8 @@ def _backward_chain(
     if split_tc and groups is None:
         # pass 2 on the tcgen05 scan: segment ``seg`` starts from dht[seg], the stitched dh_end[seg]; the first segment
         # of a sequence stores its dh0 (the register pass 2's contract)
-        ex.launch(tc_stage, segs.num_segments, num_v_heads, 1, qn, kn, w, do, g_cs, dht32, dh, *scan_x, dv2, dh0, dh0,
-                  meta.chunk_start, meta.chunk_len, segs.seg_chunk_start, segs.seg_seq, meta.seq_chunk_start,
+        ex.launch(tc_stage, segs.num_segments, num_v_heads, 1, qn, kn, w, do, g_cs, dht32, dh, *scan_x, dv2, *lo_x, dh0,
+                  dh0, meta.chunk_start, meta.chunk_len, segs.seg_chunk_start, segs.seg_seq, meta.seq_chunk_start,
                   num_heads, num_v_heads, use_dht, 1 if has_initial_state else 0, scale)  # fmt: skip
     elif not (use_tc or split_tc or split1 is not None):
         ex.launch(scan_stage, segs.num_segments, num_v_heads, HEAD_DIM // vb, qn, kn, w, do, dv_local, g_cs, dht32, dh,
@@ -5829,8 +5901,8 @@ def _backward_chain(
 
             def dhu_tc2(s0, s1):
                 return ex.bind(tc_stage, s1 - s0, num_v_heads, 1, qn, kn, w, do, g_cs,
-                               dht32[s0:s1] if use_dht else dht32, dh, *scan_x, dv2, dh0, dh0, meta.chunk_start,
-                               meta.chunk_len, segs.seg_chunk_start[s0:s1 + 1], segs.seg_seq[s0:s1],
+                               dht32[s0:s1] if use_dht else dht32, dh, *scan_x, dv2, *lo_x, dh0, dh0,
+                               meta.chunk_start, meta.chunk_len, segs.seg_chunk_start[s0:s1 + 1], segs.seg_seq[s0:s1],
                                meta.seq_chunk_start, num_heads, num_v_heads, use_dht, 1 if has_initial_state else 0,
                                scale)  # fmt: skip
 
@@ -5878,9 +5950,9 @@ def _backward_chain(
                 strides = tuple(_row_stride(t) for t in (v, dq, dk, dv))
             if form in GROUP_TAILS and groups is None:
                 # one launch over the whole table, issued directly: the host path of the deterministic package's tail
-                ex.launch(tail_stage, num_chunks * num_v_heads, 1, 1, qn, kn, rstd_q, rstd_k, v_new, do, dv2, h, dh,
-                          *tail_x, g_cs, v, A, beta32, dq, dk, dg, dv, dbeta, meta.chunk_start, meta.chunk_len,
-                          num_heads, num_v_heads, scale, normalize, *strides)  # fmt: skip
+                ex.launch(tail_stage, num_chunks * num_v_heads, 1, 1, qn, kn, rstd_q, rstd_k, v_new, do, dv2, *lo_x,
+                          h, dh, *tail_x, g_cs, v, A, beta32, dq, dk, dg, dv, dbeta, meta.chunk_start,
+                          meta.chunk_len, num_heads, num_v_heads, scale, normalize, *strides)  # fmt: skip
                 return ex.grads(
                     meta, dq, dk, dv, dg, dbeta, dh0 if has_initial_state else None
                 )
@@ -5898,9 +5970,9 @@ def _backward_chain(
 
                 def tail(c0, c1):
                     h_r, dh_r, x_r, cs_r, cl_r = rows(c0, c1)
-                    ex.launch(stage, (c1 - c0) * num_v_heads, 1, 1, qn, kn, rstd_q, rstd_k, v_new, do, dv2, h_r, dh_r,
-                              *x_r, g_cs, v, A, beta32, dq, dk, dg, dv, dbeta, cs_r, cl_r, num_heads, num_v_heads,
-                              scale, normalize, *strides)  # fmt: skip
+                    ex.launch(stage, (c1 - c0) * num_v_heads, 1, 1, qn, kn, rstd_q, rstd_k, v_new, do, dv2, *lo_x,
+                              h_r, dh_r, *x_r, g_cs, v, A, beta32, dq, dk, dg, dv, dbeta, cs_r, cl_r, num_heads,
+                              num_v_heads, scale, normalize, *strides)  # fmt: skip
 
             else:
                 stage = tail_stage
@@ -5924,9 +5996,9 @@ def _backward_chain(
                     for s0, s1 in ranges:
                         a, b = c0 + s0, c0 + s1
                         h_r, dh_r, x_r, cs_r, cl_r = rows(a, b)
-                        ex.launch(stage, (b - a) * num_v_heads, 1, 1, qn, kn, rstd_q, rstd_k, v_new, do, dv2, h_r, dh_r,
-                                  *x_r, g_cs, v, A, beta32, dq, dk, dg, dv, dbeta, ws, ws_count, cs_r, cl_r, num_heads,
-                                  num_v_heads, scale, normalize, tiles, v_rows)  # fmt: skip
+                        ex.launch(stage, (b - a) * num_v_heads, 1, 1, qn, kn, rstd_q, rstd_k, v_new, do, dv2, *lo_x,
+                                  h_r, dh_r, *x_r, g_cs, v, A, beta32, dq, dk, dg, dv, dbeta, ws, ws_count, cs_r, cl_r,
+                                  num_heads, num_v_heads, scale, normalize, tiles, v_rows)  # fmt: skip
         except BaseException:
             # the early groups' side stream, joined as the dispatch below would
             if forked is not None:

@@ -18,7 +18,7 @@ typedef signed char        int8_t;
 typedef unsigned char      uint8_t;
 typedef unsigned short     uint16_t;
 typedef unsigned int       uint32_t;
-#if defined(__CUDACC_RTC__)
+#if defined(__CUDACC_RTC__) || defined(_MSC_VER)
 typedef unsigned long long uint64_t;
 #else
 typedef unsigned long      uint64_t;
@@ -1801,6 +1801,7 @@ kernel_cake_gdn_det_train_446adf6e2aa8ec228bc5(const __grid_constant__ CUtensorM
                     : "=r"(uf_7[0]), "=r"(uf_7[1]), "=r"(uf_7[2]), "=r"(uf_7[3])
                     : "r"(u_stage + (unsigned int)((64 + p_1 * 16 + lane_2 % 16 / 8 * 8) / 64 * 8192 + ((48 + 8 * (lane_2 / 16) + lane_2 % 8) * 128 + (64 + p_1 * 16 + lane_2 % 16 / 8 * 8) % 64 * 2 ^ ((48 + 8 * (lane_2 / 16) + lane_2 % 8) * 128 + (64 + p_1 * 16 + lane_2 % 16 / 8 * 8) % 64 * 2 >> 7 & 7) << 4)))
                     : "memory");
+                asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                 float vv_7[8];
                 float pv_7[8];
                 vv_7[0] = __uint_as_float(uf_7[0] << 16) - wb_1[8];
