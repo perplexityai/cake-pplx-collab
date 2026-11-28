@@ -23919,8 +23919,6 @@ def test_gpu_router_0329_rows(key, record_property):
 DET_0330_PART_KEYS = {
     ("sm_103a", 152): (
         ("sm_103a", False, False, False, False, False, 4096, 1536, 16380),
-        ("sm_103a", False, False, False, False, False, 8192, 4096, 32736),
-        ("sm_103a", False, False, False, False, False, 8192, 4096, 32768),
         ("sm_103a", False, False, False, False, False, 18432, 1536, 16380),
         ("sm_103a", False, True, False, False, False, 1024, 4096, 32736),
         ("sm_103a", False, True, False, False, False, 1024, 4096, 32768),
@@ -23928,16 +23926,11 @@ DET_0330_PART_KEYS = {
         ("sm_103a", False, True, False, False, False, 3584, 7168, 16380),
         ("sm_103a", False, True, False, False, False, 7168, 3584, 16380),
         ("sm_103a", False, True, False, False, False, 7168, 6144, 16380),
-        ("sm_103a", False, True, False, False, False, 8192, 4096, 32768),
         ("sm_103a", True, True, True, False, False, 6144, 16380, 7168),
         ("sm_103a", True, True, True, False, False, 7168, 16380, 6144),
     ),
     ("sm_100a", 148): (
-        ("sm_100a", False, False, False, False, False, 4096, 1536, 16380),
         ("sm_100a", False, True, False, False, False, 1024, 4096, 32736),
-        ("sm_100a", False, True, False, False, False, 1024, 4096, 32768),
-        ("sm_100a", False, True, False, False, False, 4096, 1024, 32736),
-        ("sm_100a", False, True, False, False, False, 7168, 1536, 16380),
     ),
 }
 DET_0330_PRIOR = {
@@ -23945,8 +23938,6 @@ DET_0330_PRIOR = {
 DET_0330_NEW_PARTS = ()
 DET_0330_ROWS = (
     (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 4096, 1536, 16380), "fwd", "bf16", 16380, ("proj", 1536, 4096)),
-    (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 8192, 4096, 32736), "fwd", "bf16", 32736, ("proj", 4096, 8192)),
-    (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 8192, 4096, 32768), "fwd", "bf16", 32768, ("proj", 4096, 8192)),
     (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 18432, 1536, 16380), "fwd", "bf16", 16380, ("proj", 1536, 18432)),
     (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 1024, 4096, 32736), "dgrad", "bf16", 32736, ("proj", 1024, 4096)),
     (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 1024, 4096, 32768), "dgrad", "bf16", 32768, ("proj", 1024, 4096)),
@@ -23954,14 +23945,9 @@ DET_0330_ROWS = (
     (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 3584, 7168, 16380), "dgrad", "bf16", 16380, ("proj", 3584, 7168)),
     (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 7168, 3584, 16380), "dgrad", "bf16", 16380, ("proj", 7168, 3584)),
     (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 7168, 6144, 16380), "dgrad", "bf16", 16380, ("proj", 7168, 6144)),
-    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 8192, 4096, 32768), "dgrad", "bf16", 32768, ("proj", 8192, 4096)),
     (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 6144, 16380, 7168), "wgrad", "f32", 16380, ("proj", 6144, 7168)),
     (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 7168, 16380, 6144), "wgrad", "f32", 16380, ("proj", 7168, 6144)),
-    (("sm_100a", 148), ("sm_100a", False, False, False, False, False, 4096, 1536, 16380), "fwd", "bf16", 16380, ("proj", 1536, 4096)),
     (("sm_100a", 148), ("sm_100a", False, True, False, False, False, 1024, 4096, 32736), "dgrad", "bf16", 32736, ("proj", 1024, 4096)),
-    (("sm_100a", 148), ("sm_100a", False, True, False, False, False, 1024, 4096, 32768), "dgrad", "bf16", 32768, ("proj", 1024, 4096)),
-    (("sm_100a", 148), ("sm_100a", False, True, False, False, False, 4096, 1024, 32736), "dgrad", "bf16", 32736, ("proj", 4096, 1024)),
-    (("sm_100a", 148), ("sm_100a", False, True, False, False, False, 7168, 1536, 16380), "dgrad", "bf16", 16380, ("proj", 7168, 1536)),
 )
 # fmt: on
 

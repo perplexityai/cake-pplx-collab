@@ -28269,20 +28269,6 @@ NEW_KEYS_0330 = {
             "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
             "stt": False, "sw": 0,
         },
-        ("sm_103a", False, False, False, False, False, 8192, 4096, 32736): {
-            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": True, "cta1": False, "cta_rows": 128,
-            "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": True, "lw": False,
-            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 15, "quad_store": False,
-            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
-            "stt": False, "sw": 0,
-        },
-        ("sm_103a", False, False, False, False, False, 8192, 4096, 32768): {
-            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": True, "cta1": False, "cta_rows": 128,
-            "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": True, "lw": False,
-            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 15, "quad_store": False,
-            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
-            "stt": False, "sw": 0,
-        },
         ("sm_103a", False, False, False, False, False, 18432, 1536, 16380): {
             "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": True, "cta1": False, "cta_rows": 128,
             "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": True, "lw": False,
@@ -28332,13 +28318,6 @@ NEW_KEYS_0330 = {
             "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
             "stt": False, "sw": 0,
         },
-        ("sm_103a", False, True, False, False, False, 8192, 4096, 32768): {
-            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": True, "cta1": False, "cta_rows": 128,
-            "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": True, "lw": False,
-            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 15, "quad_store": False,
-            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
-            "stt": False, "sw": 0,
-        },
         ("sm_103a", True, True, True, False, False, 6144, 16380, 7168): {
             "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 256,
             "epi": "tma", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": False, "lw": False,
@@ -28355,35 +28334,7 @@ NEW_KEYS_0330 = {
         },
     },
     ("sm_100a", 148): {
-        ("sm_100a", False, False, False, False, False, 4096, 1536, 16380): {
-            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": True, "cta1": False, "cta_rows": 128,
-            "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": True, "lw": False,
-            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 15, "quad_store": False,
-            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
-            "stt": False, "sw": 0,
-        },
         ("sm_100a", False, True, False, False, False, 1024, 4096, 32736): {
-            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": True, "cta1": False, "cta_rows": 128,
-            "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": True, "lw": False,
-            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 15, "quad_store": False,
-            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
-            "stt": False, "sw": 0,
-        },
-        ("sm_100a", False, True, False, False, False, 1024, 4096, 32768): {
-            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": True, "cta1": False, "cta_rows": 128,
-            "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": True, "lw": False,
-            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 15, "quad_store": False,
-            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
-            "stt": False, "sw": 0,
-        },
-        ("sm_100a", False, True, False, False, False, 4096, 1024, 32736): {
-            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 128,
-            "epi": "tma", "f32_v8": False, "form": "w8rs", "hints": ("none", "none"), "htail": False, "lw": False,
-            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 0, "quad_store": False,
-            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "slots": 1, "store_ef": False,
-            "store_hint": "none", "stt": False, "sw": 0,
-        },
-        ("sm_100a", False, True, False, False, False, 7168, 1536, 16380): {
             "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": True, "cta1": False, "cta_rows": 128,
             "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": True, "lw": False,
             "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 15, "quad_store": False,
@@ -28397,13 +28348,11 @@ PRIOR_0330 = {
 NEW_PARTS_0330 = ()
 LEFT_OUT_0330 = {
 }
-COUNTS_0330 = {("sm_103a", 152): (13, 13, 15), ("sm_100a", 148): (5, 5, 31)}
+COUNTS_0330 = {("sm_103a", 152): (10, 10, 18), ("sm_100a", 148): (1, 1, 35)}
 ROUTER_0330_ENTRIES = 15
 PLAN_FIELDS_0330 = ("template", "num_full", "tail_tiles", "sk_units", "iters_per_unit", "sk_exact", "sk_sync", "htail_plan", "group_m", "promote_blocks")
 PLANS_0330 = {
     (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 4096, 1536, 16380)): ("dense_proj_det_gemm_kk_n256_ht_cg_pro15", 988, 36, 72, 24, 0, False, True, 16, 0),
-    (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 8192, 4096, 32736)): ("dense_proj_det_gemm_kk_n256_ht_cg_pro15", 4096, 0, 0, 64, 0, False, False, 16, 0),
-    (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 8192, 4096, 32768)): ("dense_proj_det_gemm_kk_n256_ht_cg_pro15", 4096, 0, 0, 64, 0, False, False, 16, 0),
     (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 18432, 1536, 16380)): ("dense_proj_det_gemm_kk_n256_ht_cg_pro15", 4608, 0, 0, 24, 0, False, False, 16, 0),
     (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 1024, 4096, 32736)): ("dense_proj_det_gemm_kn_n256_ht_cg_pro15", 512, 0, 0, 64, 0, False, False, 16, 0),
     (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 1024, 4096, 32768)): ("dense_proj_det_gemm_kn_n256_ht_cg_pro15", 512, 0, 0, 64, 0, False, False, 16, 0),
@@ -28411,19 +28360,12 @@ PLANS_0330 = {
     (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 3584, 7168, 16380)): ("dense_proj_det_gemm_kn_n256_m256_ht_cg_or_pro7", 448, 0, 0, 112, 0, False, False, 16, 0),
     (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 7168, 3584, 16380)): ("dense_proj_det_gemm_kn_n256_ht_cg_pro15", 1792, 0, 0, 56, 0, False, False, 16, 0),
     (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 7168, 6144, 16380)): ("dense_proj_det_gemm_kn_n256_m256_ht_cg_or_pro7", 896, 0, 0, 96, 0, False, False, 16, 0),
-    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 8192, 4096, 32768)): ("dense_proj_det_gemm_kn_n256_ht_cg_pro15", 4096, 0, 0, 64, 0, False, False, 16, 0),
     (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 6144, 16380, 7168)): ("dense_proj_det_gemm_nn_n256_m256_f32_tma1_sks_sb3_pro7", 304, 32, 64, 128, 0, True, False, 16, 0),
     (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 7168, 16380, 6144)): ("dense_proj_det_gemm_nn_n256_m256_f32_tma1_sks_sb3_pro7", 304, 32, 64, 128, 0, True, False, 16, 0),
-    (("sm_100a", 148), ("sm_100a", False, False, False, False, False, 4096, 1536, 16380)): ("dense_proj_det_gemm_kk_n256_ht_cg_pro15", 1024, 0, 0, 24, 0, False, False, 16, 0),
     (("sm_100a", 148), ("sm_100a", False, True, False, False, False, 1024, 4096, 32736)): ("dense_proj_det_gemm_kn_n256_ht_cg_pro15", 512, 0, 0, 64, 0, False, False, 16, 0),
-    (("sm_100a", 148), ("sm_100a", False, True, False, False, False, 1024, 4096, 32768)): ("dense_proj_det_gemm_kn_n256_ht_cg_pro15", 512, 0, 0, 64, 0, False, False, 16, 0),
-    (("sm_100a", 148), ("sm_100a", False, True, False, False, False, 4096, 1024, 32736)): ("dense_proj_det_gemm_kn_n256_tma1_w8rs", 2048, 0, 0, 16, 0, False, False, 16, 0),
-    (("sm_100a", 148), ("sm_100a", False, True, False, False, False, 7168, 1536, 16380)): ("dense_proj_det_gemm_kn_n256_ht_cg_pro15", 1776, 16, 32, 24, 0, False, True, 16, 0),
 }
 A0_PLANS_0330 = {
     (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 4096, 1536, 16380)): ("dense_proj_det_gemm_kk_n256_pro7", 1024, 0, 0, 24, 0, False, False, 16, 0),
-    (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 8192, 4096, 32736)): ("dense_proj_det_gemm_kk_n256_pro7", 4096, 0, 0, 64, 0, False, False, 16, 0),
-    (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 8192, 4096, 32768)): ("dense_proj_det_gemm_kk_n256_pro7", 4096, 0, 0, 64, 0, False, False, 16, 0),
     (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 18432, 1536, 16380)): ("dense_proj_det_gemm_kk_n256_pro7", 4608, 0, 0, 24, 0, False, False, 16, 0),
     (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 1024, 4096, 32736)): ("dense_proj_det_gemm_kn_n256_pro7", 512, 0, 0, 64, 0, False, False, 16, 0),
     (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 1024, 4096, 32768)): ("dense_proj_det_gemm_kn_n256_pro7", 512, 0, 0, 64, 0, False, False, 16, 0),
@@ -28431,19 +28373,12 @@ A0_PLANS_0330 = {
     (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 3584, 7168, 16380)): ("dense_proj_det_gemm_kn_n256_pro7", 896, 0, 0, 112, 0, False, False, 16, 0),
     (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 7168, 3584, 16380)): ("dense_proj_det_gemm_kn_n256_pro7", 1792, 0, 0, 56, 0, False, False, 16, 0),
     (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 7168, 6144, 16380)): ("dense_proj_det_gemm_kn_n256_pro7", 1792, 0, 0, 96, 0, False, False, 16, 0),
-    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 8192, 4096, 32768)): ("dense_proj_det_gemm_kn_n256_pro7", 4096, 0, 0, 64, 0, False, False, 16, 0),
     (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 6144, 16380, 7168)): ("dense_proj_det_gemm_nn_n256_m256_f32_tma1_pro7", 336, 0, 0, 256, 0, False, False, 16, 0),
     (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 7168, 16380, 6144)): ("dense_proj_det_gemm_nn_n256_m256_f32_tma1_pro7", 336, 0, 0, 256, 0, False, False, 16, 0),
-    (("sm_100a", 148), ("sm_100a", False, False, False, False, False, 4096, 1536, 16380)): ("dense_proj_det_gemm_kk_n256_pro7", 1024, 0, 0, 24, 0, False, False, 16, 0),
     (("sm_100a", 148), ("sm_100a", False, True, False, False, False, 1024, 4096, 32736)): ("dense_proj_det_gemm_kn_n256_pro7", 512, 0, 0, 64, 0, False, False, 16, 0),
-    (("sm_100a", 148), ("sm_100a", False, True, False, False, False, 1024, 4096, 32768)): ("dense_proj_det_gemm_kn_n256_pro7", 512, 0, 0, 64, 0, False, False, 16, 0),
-    (("sm_100a", 148), ("sm_100a", False, True, False, False, False, 4096, 1024, 32736)): ("dense_proj_det_gemm_kn_n256_tma1_w8", 2048, 0, 0, 16, 0, False, False, 8, 0),
-    (("sm_100a", 148), ("sm_100a", False, True, False, False, False, 7168, 1536, 16380)): ("dense_proj_det_gemm_kn_n256_pro7", 1792, 0, 0, 24, 0, False, False, 16, 0),
 }
 ROWS_0330 = {
     (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 4096, 1536, 16380)): (("fwd", "bf16", 16380, ("proj", 1536, 4096)),),
-    (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 8192, 4096, 32736)): (("fwd", "bf16", 32736, ("proj", 4096, 8192)),),
-    (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 8192, 4096, 32768)): (("fwd", "bf16", 32768, ("proj", 4096, 8192)),),
     (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 18432, 1536, 16380)): (("fwd", "bf16", 16380, ("proj", 1536, 18432)),),
     (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 1024, 4096, 32736)): (("dgrad", "bf16", 32736, ("proj", 1024, 4096)),),
     (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 1024, 4096, 32768)): (("dgrad", "bf16", 32768, ("proj", 1024, 4096)),),
@@ -28451,14 +28386,9 @@ ROWS_0330 = {
     (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 3584, 7168, 16380)): (("dgrad", "bf16", 16380, ("proj", 3584, 7168)),),
     (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 7168, 3584, 16380)): (("dgrad", "bf16", 16380, ("proj", 7168, 3584)),),
     (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 7168, 6144, 16380)): (("dgrad", "bf16", 16380, ("proj", 7168, 6144)),),
-    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 8192, 4096, 32768)): (("dgrad", "bf16", 32768, ("proj", 8192, 4096)),),
     (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 6144, 16380, 7168)): (("wgrad", "f32", 16380, ("proj", 6144, 7168)),),
     (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 7168, 16380, 6144)): (("wgrad", "f32", 16380, ("proj", 7168, 6144)),),
-    (("sm_100a", 148), ("sm_100a", False, False, False, False, False, 4096, 1536, 16380)): (("fwd", "bf16", 16380, ("proj", 1536, 4096)),),
     (("sm_100a", 148), ("sm_100a", False, True, False, False, False, 1024, 4096, 32736)): (("dgrad", "bf16", 32736, ("proj", 1024, 4096)),),
-    (("sm_100a", 148), ("sm_100a", False, True, False, False, False, 1024, 4096, 32768)): (("dgrad", "bf16", 32768, ("proj", 1024, 4096)),),
-    (("sm_100a", 148), ("sm_100a", False, True, False, False, False, 4096, 1024, 32736)): (("dgrad", "bf16", 32736, ("proj", 4096, 1024)),),
-    (("sm_100a", 148), ("sm_100a", False, True, False, False, False, 7168, 1536, 16380)): (("dgrad", "bf16", 16380, ("proj", 7168, 1536)),),
 }
 ROWS_0330_KEEP = (
     (("sm_103a", 152), "fwd", "bf16", 16380, ("proj", 12288, 7168)),
@@ -28476,6 +28406,9 @@ ROWS_0330_KEEP = (
     (("sm_103a", 152), "wgrad", "bf16", 32736, ("proj", 4096, 12288)),
     (("sm_103a", 152), "wgrad", "f32", 32736, ("proj", 4096, 12288)),
     (("sm_103a", 152), "dgrad", "bf16", 32736, ("proj", 8192, 4096)),
+    (("sm_103a", 152), "fwd", "bf16", 32736, ("proj", 4096, 8192)),
+    (("sm_103a", 152), "fwd", "bf16", 32768, ("proj", 4096, 8192)),
+    (("sm_103a", 152), "dgrad", "bf16", 32768, ("proj", 8192, 4096)),
     (("sm_100a", 148), "dgrad", "bf16", 16380, ("proj", 1536, 18432)),
     (("sm_100a", 148), "fwd", "bf16", 16380, ("proj", 1536, 18432)),
     (("sm_100a", 148), "dgrad", "bf16", 16380, ("proj", 3584, 7168)),
@@ -28507,6 +28440,10 @@ ROWS_0330_KEEP = (
     (("sm_100a", 148), "dgrad", "bf16", 32736, ("proj", 8192, 4096)),
     (("sm_100a", 148), "wgrad", "bf16", 32736, ("proj", 8192, 4096)),
     (("sm_100a", 148), "wgrad", "f32", 32736, ("proj", 8192, 4096)),
+    (("sm_100a", 148), "fwd", "bf16", 16380, ("proj", 1536, 4096)),
+    (("sm_100a", 148), "dgrad", "bf16", 16380, ("proj", 7168, 1536)),
+    (("sm_100a", 148), "dgrad", "bf16", 32768, ("proj", 1024, 4096)),
+    (("sm_100a", 148), "dgrad", "bf16", 32736, ("proj", 4096, 1024)),
 )
 # fmt: on
 
