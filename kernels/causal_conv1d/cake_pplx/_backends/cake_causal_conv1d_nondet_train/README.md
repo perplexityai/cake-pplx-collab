@@ -249,6 +249,33 @@ check), 0.80-0.90 (40-token units), 0.92-0.97 (56-token units from 8192
 tokens) and 0.92-0.95 (GB300, world size 4). Every other device, world size,
 channel count or sequence length keeps the plan above.
 
+On the keys of the L1o route table (`kcp_jit.L1O_ROUTE`, from 0.2.25) the
+overlapped backward runs the one-program backward (`kcp_bwd`) in place of
+`kcp_bwd_dyn`: launched before the wait, with every `tail_row_off` entry -1 and
+`kcp_jit.L1O_RESERVE_SMS` SMs of its grid left free (B200 3, GB300 10, VR200
+none). The tail-row program then waits for it as well as for the exchange.
+`dx` is unchanged; `dweight` is summed in the one-program backward's FP32
+accumulators. A key is a device, a world size, a channel count and a token
+count on the rank:
+
+| Device | World size | Channels: tokens on the rank |
+| --- | --- | --- |
+| B200 (148 SMs) | 2 | 256: 32768; 512: 4096, 8192, 12288, 16384, 18432, 20480, 24576, 26624, 28672, 32768; 768: 16384, 32768; 1024: 32768 |
+| B200 (148 SMs) | 4 | 512: 4096, 16384, 18432, 24576, 32768 |
+| B200 (148 SMs) | 8 | 512: 16384, 18432, 32768 |
+| GB300 (152 SMs) | 2 | 256: 32768; 512: 4096, 6144, 8192, 12288, 16384, 18432, 20480, 24576, 28672, 32768; 768: 16384, 32768; 1024: 32768 |
+| GB300 (152 SMs) | 4 | 512: 4096, 16384, 18432, 24576, 32768 |
+| VR200 (212 SMs) | 2 | 512: 14336, 16384, 18432, 20480, 28672, 32768; 768: 16384, 32768 |
+| VR200 (212 SMs) | 4 | 512: 4096, 16384, 32768 |
+
+A key is listed when, in two runs on different nodes, its backward ran faster
+than the better of the 0.2.23 and 0.2.24 plans beyond the noise band and
+neither its backward nor its checkpointed backward ran slower than det, on
+every call form timed on it (contiguous and zigzag single-tensor, three-tensor
+and CUDA Graph replay calls). Every other call keeps the overlapped pair,
+including `dweight_sum="fp32_pair"` calls, the 216-SM VR200 and shapes between
+the keys.
+
 Under any of these conditions, the one-program backward (`kcp_bwd`) runs after the wait instead:
 
 - `bwd_reserve_sms >= 1`

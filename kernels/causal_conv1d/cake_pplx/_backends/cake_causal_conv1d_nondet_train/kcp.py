@@ -79,8 +79,13 @@ backward (kind ``kcp_bwd``) after the wait instead: one ordinary launch whose
 CTAs add their FP32 ``dweight`` CTA rows into the zeroed FP32 accumulators
 ``acc`` (``[C, 4]``) with unordered global reductions; the last CTA of each
 channel tile (a ticket on its ``work`` counter) stores the rank-local FP32
-``dweight`` partial and zeroes the tile's accumulators and counter.  Both
-programs' workspaces are the package's cached backward workspace of the device
+``dweight`` partial and zeroes the tile's accumulators and counter.  On the
+keys of the L1o route table (:func:`kcp_jit.l1o_route`: measured devices, world
+sizes, channels and tokens on the rank; never ``dweight_sum="fp32_pair"``) the
+overlapped backward launches that one-program backward in place of
+``kcp_bwd_dyn``, before the wait, with every ``tail_row_off`` entry ``-1`` and
+:data:`kcp_jit.L1O_RESERVE_SMS` SMs left free; its tail-row program then waits
+for it as well as for the exchange.  Both programs' workspaces are the package's cached backward workspace of the device
 and current stream (zero before and after every launch; inside a CUDA Graph
 capture with a nonzero capture id one zeroed buffer per capture and stream,
 shared by the capture's backward calls on that stream: a buffer an earlier
@@ -253,6 +258,7 @@ from .kcp_jit import (
     dyn_plan,
     dyn_workspace_layout,
     head_grid,
+    l1o_route,
     load,
     route_modules,
     run_module,
@@ -1032,7 +1038,21 @@ def _dyn_host(
     :func:`head_grid` (``None`` when the rank receives no tail row: the main program then writes every row as the
     single program does).  ``pair``: the main program is the ``kcp_bwd_dyn_pair`` route's (same plan and workspace).
     ``world_size``: the call's context-parallel world size (:func:`dyn_plan`'s context-parallel unit table, and with
-    ``arch`` its measured parts)."""
+    ``arch`` its measured parts).  A call on a key of the L1o route table (:func:`kcp_jit.l1o_route`; never a ``pair``
+    call) gets the one-program backward's state instead (:func:`_l1o_host`, ``"l1o": True``)."""
+    if not pair:
+        reserve = l1o_route(arch, _loader.sm_count(device_index), world_size, S, C)
+        if reserve is not None:
+            return _l1o_host(
+                arch,
+                S=S,
+                C=C,
+                n_frag=n_frag,
+                tail_rows=tail_rows,
+                device=device,
+                device_index=device_index,
+                reserve=reserve,
+            )
     (main,) = route_modules(arch, KCP_BWD_DYN_PAIR if pair else KCP_BWD_DYN)
     p = dyn_plan(S, C, _loader.sm_count(device_index), world_size=world_size, arch=arch)
     halo = None
@@ -1045,6 +1065,51 @@ def _dyn_host(
         "layout": dyn_workspace_layout(_loader.MODULES[main], C, p["n_tiles"], p["L"]),
         "tile_words": DYN_TILE_WORDS * p["n_tiles"],
         "scalars": {key: p[key] for key in ("M", "NL", "P", "L", "n_ctas")},
+        "no_tail": torch.full((n_frag, HALO), -1, dtype=torch.int32, device=device),
+        "halo": halo,
+    }
+
+
+def _l1o_host(
+    arch: str,
+    *,
+    S: int,
+    C: int,
+    n_frag: int,
+    tail_rows: int,
+    device: torch.device,
+    device_index: int,
+    reserve: int,
+) -> dict[str, Any]:
+    """The L1o route's host state of a call (:data:`kcp_jit.L1O_ROUTE`): the one-program backward's (kind ``kcp_bwd``)
+    launch plans over :func:`_bwd_grid` with ``reserve`` SMs left free, its plan scalars and accumulator layout, the
+    all ``-1`` table it runs with as ``tail_row_off`` (it writes every row, as at a document end), and the tail-row
+    program's launch plan as in :func:`_dyn_host` (``None`` when the rank receives no tail row)."""
+    names = selected_modules(arch, KCP_BWD, C=C, S=S)
+    record = _loader.MODULES[names[0]]
+    scalars = plan(S, C, n_frag, geometry=record["grid_rule"]["geometry"], legacy=True)
+    grid_x = launch_grid(record, device_index=device_index)[0]
+    if scalars["n_ch_tiles"] > grid_x:
+        raise ValueError(
+            f"C={C} spans more channel tiles than the backward's grid on this device holds"
+        )
+    halo = None
+    if tail_rows > 0:
+        (halo_name,) = route_modules(arch, KCP_BWD_HALO)
+        grid = head_grid(_loader.MODULES[halo_name], n_frag=n_frag, C=C)
+        halo = _launch_plan(halo_name, grid, device_index)
+    return {
+        "l1o": True,
+        "launches": tuple(
+            _launch_plan(
+                name,
+                _bwd_grid(_loader.MODULES[name], scalars["n_ch_tiles"], device_index, reserve),
+                device_index,
+            )
+            for name in names
+        ),
+        "layout": _accumulator_layout(record, C, scalars["n_ch_tiles"]),
+        "scalars": _scalars(scalars),
         "no_tail": torch.full((n_frag, HALO), -1, dtype=torch.int32, device=device),
         "halo": halo,
     }
@@ -1074,7 +1139,36 @@ def _launch_dyn(
     (``skip_row_off``: ``d["no_tail"]`` writes every row; the context's ``tail_row_off`` leaves the rows the tail-row
     program writes), a fragment's last rows without the successors' tail rows, as at a document end, and the rank's
     FP32 ``dweight`` partial, summed in the zeroed accumulator copies and words of the device's cached backward
-    workspace.  ``spare``: an FP32 ``[*, C]`` tensor passed as ``dpre_tail``, which no ``-1`` entry reads."""
+    workspace.  ``spare``: an FP32 ``[*, C]`` tensor passed as ``dpre_tail``, which no ``-1`` entry reads.  The L1o
+    route's state (``"l1o"``, :func:`_l1o_host`) launches the one-program backward instead."""
+    if d.get("l1o"):
+        # the L1o route (:func:`_l1o_host`): the one-program backward writes every row (``skip`` unused) and sums the
+        # rank's FP32 ``dweight`` partial in its own zeroed accumulators
+        acc, acc_work = _backward_accumulators(
+            None,
+            d["layout"],
+            device=device,
+            device_index=device_index,
+            entry="cake_causal_conv1d_nondet_train_kcp_backward",
+        )
+        values: dict[str, Any] = {
+            "x": x_flat,
+            "w": w,
+            "cu": cu,
+            "dy": dy_flat,
+            "dx": dx2,
+            "dw": dw_out,
+            "acc": acc,
+            "work": acc_work,
+            "hist": hist_t,
+            "hist_row_off": hist_row_off,
+            "dpre_tail": spare,
+            "tail_row_off": d["no_tail"],
+            **d["scalars"],
+        }
+        for info in d["launches"]:
+            _launch_trim(info, values, device_index)
+        return
     acc, words = _backward_accumulators(
         None,
         d["layout"],
@@ -2620,9 +2714,13 @@ def _bwd_overlap(
             **args,
         )
         if side is not None:
+            caller = torch.cuda.current_stream(device)
             with torch.cuda.stream(side):
                 if work is not None:
                     work.wait()
+                if e["dyn"].get("l1o"):
+                    # the L1o route's one-program backward writes the rows the tail-row program writes again
+                    side.wait_stream(caller)
                 _launch_halo(
                     e["dyn"],
                     tail_row_off=e["tail_row_off"],
@@ -3421,9 +3519,13 @@ def _kcp_backward_multi(
                 )
         if side is not None:
             in_place = len(calls) > 1 and len({c[1] for c in calls}) == 1
+            caller = torch.cuda.current_stream(device)
             with torch.cuda.stream(side):
                 if work is not None:
                     work.wait()
+                if any(c[8]["dyn"] is not None and c[8]["dyn"].get("l1o") for c in calls):
+                    # the L1o route's one-program backwards write the rows the tail-row programs write again
+                    side.wait_stream(caller)
                 _multi_after_wait(calls, recv, tails, device, in_place=in_place)
     finally:
         _join_side(side, device)

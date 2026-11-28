@@ -781,6 +781,42 @@ def test_dyn_plan_unit_table_measured_parts() -> None:
 
 
 @pytest.mark.cpu_only
+def test_l1o_route_table() -> None:
+    """The L1o route (``kcp_jit.l1o_route``) applies exactly on the keys of ``kcp_jit.L1O_ROUTE`` (a measured
+    (architecture, SM count) device and a listed (world size, channels, tokens on the rank)) and returns the SMs its
+    one-program grid leaves free on that architecture; every other call (no architecture or world size, another SM
+    count, world size, channel count or token count) keeps the overlapped pair (``None``)."""
+
+    route = kcp_jit.l1o_route
+    table = kcp_jit.L1O_ROUTE
+    reserve = kcp_jit.L1O_RESERVE_SMS
+    assert {k: len(v) for k, v in table.items()} == {("sm_100a", 148): 22, ("sm_103a", 152): 19, ("sm_107a", 212): 11}
+    assert reserve == {"sm_100a": 3, "sm_103a": 10, "sm_107a": 0}
+    for (arch, sms), keys in table.items():
+        worlds = {w for w, _, _ in keys}
+        assert worlds <= {2, 4, 8}
+        for W, C, S in keys:
+            label = (arch, sms, W, C, S)
+            assert route(arch, sms, W, S, C) == reserve[arch], label
+            assert route(None, sms, W, S, C) is None, label
+            assert route(arch, sms, None, S, C) is None, label
+            for other in (sms - 1, sms + 1, 132, 160, 188, 216):
+                if (arch, other) not in table:
+                    assert route(arch, other, W, S, C) is None, (label, other)
+            for w in (1, 3, 16):
+                assert route(arch, sms, w, S, C) is None, (label, w)
+            for s in (S - 8, S + 8, 2 * S):
+                if (W, C, s) not in keys:
+                    assert route(arch, sms, W, s, C) is None, (label, s)
+            for c in (C - 1, C + 1, 2048):
+                if (W, c, S) not in keys:
+                    assert route(arch, sms, W, S, c) is None, (label, c)
+        for other_arch in ("sm_100a", "sm_103a", "sm_107a"):
+            if (other_arch, sms) not in table:
+                assert all(route(other_arch, sms, W, S, C) is None for W, C, S in keys), (other_arch, sms)
+
+
+@pytest.mark.cpu_only
 def test_dyn_workspace_layout() -> None:
     """The main program's workspace: ``slots`` copies of ``[C, 4]`` FP32 accumulators, then eight words per tile,
     ``L`` claim words and one departure word."""
