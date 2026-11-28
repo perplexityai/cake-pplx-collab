@@ -48,7 +48,9 @@ the rank; never with ``dweight_sum="fp32_pair"``) the main program is the one-pr
 of one wave with a static share of tokens per CTA, ``kcp_jit.L1O_RESERVE_SMS`` SMs short (B200 3, GB300 10, VR200
 none).  A kernel on another stream that holds more SMs than that makes the CTAs that do not fit wait for an SM to free
 up and run as a second wave, so the backward takes longer; it does not deadlock (no grid barrier, no cooperative
-launch).  The tail-row program on a key runs after the one-program backward.  The package makes no bit promise
+launch).  The tail-row program on a key runs after the one-program backward.  In a multi call that mixes key and
+non-key tensors, the non-key tensors' tail-row programs also wait for every main program on the caller's stream (the
+same results, less overlap).  The package makes no bit promise
 for any output (run to run or against the deterministic KCP entry point).  By default (``dweight_sum="fp32"``) the
 rank-local FP32 ``dweight`` partial is summed in plain FP32 words, with no compensated sums; the opt-in
 ``dweight_sum="fp32_pair"`` sums a tile's accumulator copies as an FP32 (hi, lo) pair.  Its cross-rank reduction
@@ -70,9 +72,13 @@ Name map (the deterministic package -> this module): ``cake_causal_conv1d_det_kc
 
 The backward beside a kernel of another stream: off the L1o keys the overlapped backward needs no setting (its CTAs
 claim their tokens at run time).  ``bwd_reserve_sms=K`` (SM100 / SM103; ``ValueError`` on SM107) runs the one-program
-backward after the halo exchange instead, ``K`` SMs short of its single wave, on a key too, so a kernel holding up to
-``K`` SMs leaves it in one wave.  ``dweight_sum="fp32_pair"`` (below) is never routed, so on a key it keeps the program
-whose CTAs claim their tokens at run time; on SM107 it is the only such setting::
+backward after the halo exchange's wait instead, ``K`` SMs short of its single wave, so a kernel holding up to ``K``
+SMs leaves it in one wave.  On a B200 / GB300 key the default call already runs the one-program backward, before the
+wait, with ``L1O_RESERVE_SMS`` SMs free (3 / 10); ``K >= 1`` there launches it with ``K`` SMs free instead (a larger
+grid while ``K`` is below 3 / 10, the same grid at 3 / 10) and moves it after the exchange's wait, so it adds
+headroom only for ``K`` above 3 / 10 and always gives up the overlap with the exchange.  ``dweight_sum="fp32_pair"``
+(below) is never routed, so on a key it keeps the program whose CTAs claim their tokens at run time; on SM107 it is
+the only such setting::
 
     y_local = cake_causal_conv1d_nondet_kcp(x_local, weight, ctx, bwd_reserve_sms=1)
 
@@ -141,11 +147,17 @@ def cake_causal_conv1d_nondet_kcp(
         leaves to kernels of other streams: ``K >= 1`` runs that backward after the halo exchange
         instead of the overlapped one and launches its single-wave grid ``K x ctas_per_sm`` CTAs short, so a kernel of another stream that holds up to ``K`` SMs (for example a communication kernel) does
         not push the top CTAs into a second wave; the unloaded backward gives up the work of those ``K`` SMs.
-        The forward and the exchanges are the same and ``dweight`` is summed the same way.  With ``K = 0``
-        (or ``None``) the backward already launches one SM's CTAs short wherever the last channel-tile rank of the
-        full grid holds at least ``ctas_per_sm`` CTAs, so ``K = 1`` leaves the grid unchanged at those widths (for
-        example ``C`` = 10240, 6144 and 5120 on a 152-SM GB200 / GB300, ``C`` = 10240, 6144 and 3072 on a 148-SM
-        B200) and launches one SM's CTAs fewer at every other width.  Validated by the package when given: a
+        The forward and the exchanges are the same and ``dweight`` is summed the same way.  Off the keys of the
+        L1o route table (``kcp_jit.L1O_ROUTE``) the default call runs the one-program backward only above the
+        overlapped backward's channel limit or without tokens; with ``K = 0`` (or ``None``) that program launches
+        one SM's CTAs short wherever the last channel-tile rank of the full grid holds at least ``ctas_per_sm``
+        CTAs, so ``K = 1`` leaves its grid unchanged at those widths (for example ``C`` = 10240, 6144 and 5120 on a
+        152-SM GB200 / GB300, ``C`` = 10240, 6144 and 3072 on a 148-SM B200) and launches one SM's CTAs fewer at
+        every other width.  On a B200 / GB300 key the default call already runs the one-program backward, before
+        the exchange's wait, with ``kcp_jit.L1O_RESERVE_SMS`` SMs free (3 on B200, 10 on GB300); ``K >= 1`` there
+        launches it with ``K`` SMs free instead (a larger grid while ``K`` is below that reserve, the same grid at
+        it) and after the wait, so it adds headroom only for ``K`` above the reserve and always gives up the
+        overlap with the exchange.  Validated by the package when given: a
         ``bool`` or a non-``int`` raises ``TypeError``, a negative value or one not below the device's SM count
         ``ValueError``.  On sm_107a ``K >= 1`` raises ``ValueError``: there the reserved grid costs up to 1.055x the
         shipped grid unloaded (``C`` = 1024, 62585 tokens), above this opt-in's 1.040 limit.  The deterministic
@@ -195,7 +207,9 @@ def cake_causal_conv1d_nondet_kcp_multi(
     with one halo exchange per direction, non-deterministic backward.
 
     Each tensor runs the programs of :func:`cake_causal_conv1d_nondet_kcp`; each ``dweight`` is that tensor's own
-    unordered FP32 partial.  Under torch's deterministic mode the
+    unordered FP32 partial.  When one tensor of a call with more than one rank is on a key of the L1o route table,
+    every tensor's tail-row program waits for every main program on the caller's stream, the non-key tensors' too
+    (the same results; their tail rows lose the overlap).  Under torch's deterministic mode the
     backward alerts like the single call's.
 
     Parameters

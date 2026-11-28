@@ -20,15 +20,16 @@ every ``tail_row_off`` entry ``-1``, and the tail-row program on the side stream
 
 - forced rows (any device): ``kcp.l1o_route`` is replaced by a function that returns the running architecture's
   ``kcp_jit.L1O_RESERVE_SMS`` for the row's forced channel counts (else ``None``), so small packs take the route.
-  Single calls (contiguous, zigzag and per-document zigzag; W 2, 4 and 8) and multi calls (one width, so the tail-row
-  programs read in place, and mixed widths with a forced and an unforced tensor), each eager, with checkpoint
-  recompute (with a handle, and reentrant without one), under ``graph="replay"`` (eager, capture, replay, replay),
-  the single call's previous host path (test knob ``host_trim`` 0) and a ``dweight_sum="fp32_pair"`` call (never
-  routed);
+  Single calls (contiguous, zigzag and per-document zigzag; W 2, 4 and 8): eager, checkpoint recompute with a handle,
+  reentrant checkpoint recompute without one, four calls under ``graph="replay"``, the previous host path (test knob
+  ``host_trim`` 0) and a ``dweight_sum="fp32_pair"`` call (never routed).  Multi calls (one width, so the tail-row
+  programs read in place, and mixed widths with a forced and an unforced tensor): eager, checkpoint recompute with
+  one handle, reentrant checkpoint recompute without one, four calls under ``graph="replay"`` and a
+  ``dweight_sum="fp32_pair"`` call (never routed); the previous host path is a single-call form only;
 - key rows (a measured part only: the device's (architecture, SM count) is a key of ``kcp_jit.L1O_ROUTE``): the
   shipped route on a real key (C 512 at the smallest listed token count of the world size; W 2 and 4, and 8 on
-  B200), single and multi calls (one width at W 2, a key tensor beside a non-key tensor at W 4), against the same
-  calls with the route off (``kcp.l1o_route`` returning ``None``).
+  B200), the single forms of the first tensor and the multi forms of all tensors (one width at W 2, a key tensor
+  beside a non-key tensor at W 4), against the same calls with the route off (``kcp.l1o_route`` returning ``None``).
 
 Every draw runs each form with the route and without it.  ``y``, ``dx`` and the checkpointed ``dx`` of every form
 with the route must equal the call without it bit for bit (``dx`` does not depend on the route); ``dweight`` is
@@ -38,10 +39,14 @@ judged with every output by the naive judge (``tests/cake/test_helpers/cake_naiv
 route (never on an ``fp32_pair`` call), the overlapped pair's on every other.  Before each L1o launch the spy queues a
 ``torch.cuda._sleep`` on the caller's stream, so the one-program backward starts after the exchange has arrived: a
 tail-row program that did not wait for the caller's stream would write its rows first and the one-program backward
-would overwrite them (a ``dx`` bit mismatch).
+would overwrite them (a ``dx`` bit mismatch).  Under ``graph="replay"``, with the route and without it, the forward's
+and the backward's graph events (``kcp.LAST_CALL``: ``"fwd"`` / ``"bwd"``, multi ``"fwd_multi"`` / ``"bwd_multi"``)
+of the four calls must include a capture and a replay, and ``kcp.GRAPH_STATS["fallback"]`` must not grow, so a
+capture that fails and falls back to eager calls fails the row.
 
-Launch forms as the deterministic suite: ``torch.multiprocessing`` (skipped with fewer than ``W`` visible devices)
-or one process per Slurm task (``SLURM_NTASKS == W``).  Skipped until the exporter renders the package.
+Launch forms as the deterministic suite, for every row (the key rows too): ``torch.multiprocessing`` (skipped with
+fewer than ``W`` visible devices) or one process per Slurm task (``SLURM_NTASKS == W``; each task may see one GPU).
+Skipped until the exporter renders the package.
 """
 
 from __future__ import annotations
@@ -87,6 +92,8 @@ KEY_ROWS = {
     "w4": (4, "zigzag", (512, 256)),
     "w8": (8, "contiguous", (512,)),
 }
+# The forms of ``dweight_sum="fp32_pair"`` calls (never routed).
+PAIR_FORMS = ("pair", "multi_pair")
 
 
 class _Route:
@@ -144,7 +151,7 @@ class _Route:
     def expected(self, form: str, C: int, S: int) -> bool:
         """Whether a main-program launch of ``form`` takes the L1o state in the current mode."""
 
-        if form == "pair" or self.mode == "off":
+        if form in PAIR_FORMS or self.mode == "off":
             return False
         if self.mode == "forced":
             return C in self.forced
@@ -152,14 +159,15 @@ class _Route:
 
     def check(self) -> tuple[bool, list]:
         """Every recorded launch took the expected state, and every form run launched a main program (every rank of
-        these rows has tokens): with the route, at least one in the L1o state in each form but ``pair``."""
+        these rows has tokens): with the route, at least one in the L1o state in each form but the ``fp32_pair``
+        ones."""
 
         bad = [s for s in self.seen if s[3] != self.expected(s[0], s[1], s[2])]
         launched = {s[0] for s in self.seen}
         routed = {s[0] for s in self.seen if s[3]}
         missing = [f for f in self.forms_run if f not in launched]
         if self.mode != "off":
-            missing += [f"{f}:no-l1o" for f in self.forms_run if f != "pair" and f not in routed]
+            missing += [f"{f}:no-l1o" for f in self.forms_run if f not in PAIR_FORMS and f not in routed]
         return not bad and not missing, bad[:4] + missing[:4]
 
     def restore(self) -> None:
@@ -205,16 +213,25 @@ def _single_forms(conv_kcp, kcp_api, ctx, device, route: _Route, x, w, dy, *, tr
             conv_kcp._set_test_knobs(None)
         out.update(trim0_dx=dx0, trim0_dw=dw0)
     route.form = "graph"
-    gy, gdx, gdw, events = [], [], [], []
+    gy, gdx, gdw, fwd_events, events = [], [], [], [], []
+    fallback = conv_kcp.GRAPH_STATS["fallback"]
     for _ in range(4):
         yg, hg = conv_kcp.cake_causal_conv1d_nondet_train_kcp_forward(x, w, ctx, graph="replay")
+        fwd_events.append(conv_kcp.LAST_CALL["fwd"]["graph_event"])
         dxg, dwg = conv_kcp.cake_causal_conv1d_nondet_train_kcp_backward(x, w, ctx, dy, hg, graph="replay")
         events.append(conv_kcp.LAST_CALL["bwd"]["graph_event"])
         torch.cuda.synchronize(device)
         gy.append(yg.clone())
         gdx.append(dxg.clone())
         gdw.append(dwg.clone())
-    out.update(graph_y=gy, graph_dx=gdx, graph_dw=gdw, graph_events=events)
+    out.update(
+        graph_y=gy,
+        graph_dx=gdx,
+        graph_dw=gdw,
+        graph_fwd_events=fwd_events,
+        graph_events=events,
+        graph_fallbacks=conv_kcp.GRAPH_STATS["fallback"] - fallback,
+    )
     conv_kcp.cake_causal_conv1d_nondet_train_kcp_graph_cache_clear()
     route.form = "pair"
     xl, wl = leaf(x), leaf(w)
@@ -226,7 +243,8 @@ def _single_forms(conv_kcp, kcp_api, ctx, device, route: _Route, x, w, dy, *, tr
 
 
 def _multi_forms(conv_kcp, kcp_api, ctx, device, route: _Route, xs, ws, dys) -> list[dict]:
-    """The multi call's forms (eager, checkpoint with one handle, graph replay): per tensor, their outputs."""
+    """The multi call's forms (eager, checkpoint with one handle, reentrant checkpoint without one, graph replay,
+    ``fp32_pair``): per tensor, their outputs (the graph events in the first tensor's)."""
 
     from torch.utils.checkpoint import checkpoint
 
@@ -252,11 +270,20 @@ def _multi_forms(conv_kcp, kcp_api, ctx, device, route: _Route, xs, ws, dys) -> 
     torch.autograd.backward(list(ys), list(dys))
     for i in range(n):
         out[i].update(ckpt_y=ys[i].detach(), ckpt_dx=xl[i].grad, ckpt_dw=wl[i].grad)
+    route.form = "multi_ckpt_reentrant"
+    xl, wl = leaves(xs), leaves(ws)
+    ys = checkpoint(fn, *xl, *wl, None, use_reentrant=True)
+    torch.autograd.backward(list(ys), list(dys))
+    for i in range(n):
+        out[i].update(ckpt2_dx=xl[i].grad, ckpt2_dw=wl[i].grad)
     route.form = "multi_graph"
-    runs = []
+    runs, fwd_events, events = [], [], []
+    fallback = conv_kcp.GRAPH_STATS["fallback"]
     for _ in range(4):
         yg, hg = conv_kcp.cake_causal_conv1d_nondet_train_kcp_multi_forward(xs, ws, ctx, graph="replay")
+        fwd_events.append(conv_kcp.LAST_CALL["fwd_multi"]["graph_event"])
         dxg, dwg = conv_kcp.cake_causal_conv1d_nondet_train_kcp_multi_backward(xs, ws, ctx, dys, hg, graph="replay")
+        events.append(conv_kcp.LAST_CALL["bwd_multi"]["graph_event"])
         torch.cuda.synchronize(device)
         runs.append(([t.clone() for t in yg], [t.clone() for t in dxg], [t.clone() for t in dwg]))
     for i in range(n):
@@ -265,7 +292,18 @@ def _multi_forms(conv_kcp, kcp_api, ctx, device, route: _Route, xs, ws, dys) -> 
             graph_dx=[r[1][i] for r in runs],
             graph_dw=[r[2][i] for r in runs],
         )
+    out[0].update(
+        graph_fwd_events=fwd_events,
+        graph_events=events,
+        graph_fallbacks=conv_kcp.GRAPH_STATS["fallback"] - fallback,
+    )
     conv_kcp.cake_causal_conv1d_nondet_train_kcp_graph_cache_clear()
+    route.form = "multi_pair"
+    xl, wl = leaves(xs), leaves(ws)
+    ys = kcp_api.cake_causal_conv1d_nondet_kcp_multi(xl, wl, ctx, dweight_sum="fp32_pair")
+    torch.autograd.backward(list(ys), list(dys))
+    for i in range(n):
+        out[i].update(pair_dx=xl[i].grad, pair_dw=wl[i].grad)
     torch.cuda.synchronize(device)
     return out
 
@@ -304,7 +342,7 @@ def _run_rank(rank: int, W: int, row, forced, kind: str, port: int, result_dir, 
     on = "real" if kind == "key" else "forced"
     info.update(arch=route.arch, sms=route.sms, mode=on)
     state = {"bits": True, "route_on": True, "route_off": True, "replayed": True}
-    detail: dict[str, list] = {"bits": [], "route": []}
+    detail: dict[str, list] = {"bits": [], "route": [], "graph": []}
 
     def forms(p, mode):
         route.use(mode)
@@ -331,9 +369,14 @@ def _run_rank(rank: int, W: int, row, forced, kind: str, port: int, result_dir, 
                 if not same:
                     state["bits"] = False
                     detail["bits"].append((j, name))
-            events = a.get("graph_events")
-            if events is not None and "replay" not in events:
-                state["replayed"] = False
+            for mode, d in ((on, a), ("off", b)):
+                # a graph form's forward and backward each captured and replayed, with no capture fallen back to eager
+                if "graph_events" not in d:
+                    continue
+                seen = (d["graph_fwd_events"], d["graph_events"], d["graph_fallbacks"])
+                if not all("capture" in ev and "replay" in ev for ev in seen[:2]) or seen[2] != 0:
+                    state["replayed"] = False
+                    detail["graph"].append((j, mode, *seen))
         # the judged outputs: every form with the route, per tensor (single forms first, then the multi forms)
         judged = []
         for a in got:
@@ -354,9 +397,10 @@ def _run_rank(rank: int, W: int, row, forced, kind: str, port: int, result_dir, 
     flags["bitwise_y_dx_ckpt_dx_vs_without_route"] = state["bits"]
     flags["route_taken_with_route"] = state["route_on"]
     flags["route_not_taken_without_route"] = state["route_off"]
-    flags["graph_replayed"] = state["replayed"]
+    flags["graph_captured_and_replayed_no_fallback"] = state["replayed"]
     info["bit_mismatches"] = detail["bits"][:8]
     info["route_mismatches"] = detail["route"][:4]
+    info["graph_mismatches"] = detail["graph"][:4]
     return _report(W, row, flags, info, result_dir, rank, f"l1o-{kind}")
 
 
@@ -459,9 +503,7 @@ def test_l1o_route_forced_multi_call(case) -> None:
 def test_l1o_route_on_a_measured_key(name) -> None:
     if not _supported():
         pytest.skip("the non-deterministic conv package is not rendered or does not support this device")
-    if torch.cuda.device_count() < KEY_ROWS[name][0]:
-        pytest.skip(f"{KEY_ROWS[name][0]} CUDA devices required, {torch.cuda.device_count()} visible")
     row = _key_row(name)
     if row is None:
-        pytest.skip("the running device has no L1o key at this world size and C 512 (not a measured part)")
+        pytest.skip("the running device has no L1o key at this world size and C 512 (an unmeasured part or world size)")
     _launch(row, (), "key")

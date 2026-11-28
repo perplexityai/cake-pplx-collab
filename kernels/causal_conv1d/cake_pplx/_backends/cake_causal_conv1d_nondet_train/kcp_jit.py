@@ -1075,8 +1075,9 @@ DYN_CP_V2_LONG4_WORLD = 4
 # summed in the one-program backward's FP32 accumulators.  Measured on 148-SM B200, 152-SM GB300 and 212-SM VR200
 # (world sizes 2 / 4, and 8 on B200; backward and checkpointed step; contiguous and zigzag single-tensor and 3-tensor
 # eager calls, and graph replay): a key is listed when, on every call form timed on it in both of two runs on
-# different nodes, its backward ran faster than the better of the 0.2.23 and 0.2.24 plans beyond the noise band and
-# neither its backward nor its checkpointed step ran slower than det (a form timed in one run only did not count; the
+# different nodes, its backward ran faster than the better of the 0.2.23 and 0.2.24 plans beyond the noise band, its
+# checkpointed step ran no slower than the better of the two plans, and neither its backward nor its checkpointed
+# step ran slower than det (a form timed in one run only did not count; the
 # route takes every call form at a key; the nondet backend README names the forms the first run alone timed).  Every
 # other call (other devices, world sizes or shapes, and ``dweight_sum="fp32_pair"``) keeps the overlapped pair.  The
 # one-program grid is one wave with a static share of tokens per CTA: beside a kernel on another stream that holds

@@ -64,7 +64,10 @@ the tail-row programs, so the two write disjoint rows and the tail-row programs
 run as soon as the exchange arrives, beside the main programs, instead of after
 them.  On a key the main program (the one-program backward) writes every row and
 the side stream waits for the caller's stream before the tail-row programs,
-which then write the tail rows again after it.  The caller's stream
+which then write the tail rows again after it.  In a multi call that mixes key
+and non-key tensors the side stream waits once for all of them, so the non-key
+tensors' tail-row programs also run after every main program on the caller's
+stream (the same rows and results, less overlap).  The caller's stream
 joins the side stream after the main programs (also when a launch raises).
 The buffers the side stream fills are allocated on the caller's stream before
 the fork, so the join orders their reuse (no ``record_stream``).  After the
@@ -174,14 +177,19 @@ caller's stream.  ``_set_test_knobs({"host_trim": 0})`` (a private test hook;
 the backend reads no environment variable) selects the previous host path for
 the A/B record.
 
-Backward grid beside a concurrent kernel: the main
-backward launches :func:`_bwd_grid`, ``ctas_per_sm x SM count`` CTAs less
+Backward grid beside a concurrent kernel: the one-program main
+backward (``kcp_bwd``) launches :func:`_bwd_grid`, ``ctas_per_sm x SM count`` CTAs less
 ``ctas_per_sm`` when the last channel-tile rank of that grid holds at least
 ``ctas_per_sm`` CTAs.  A kernel on another stream that keeps one SM's shared
 memory leaves room for ``ctas_per_sm`` fewer CTAs; with the full grid the top
 CTAs, each carrying a whole token stream, then run in a second wave.  The
 program derives its token streams and ticket count from ``gridDim``, so ``dx``
-keeps its bits and ``dweight`` sums the same terms in other partial sums.
+keeps its bits and ``dweight`` sums the same terms in other partial sums.  By
+default this grid serves the calls the overlapped backward does not run (more
+than ``DYN_MAX_CHANNELS`` channels, no tokens).  On a key of the L1o route
+table the default call launches ``kcp_bwd`` before the wait with the reserve
+``kcp_jit.L1O_RESERVE_SMS[arch]`` (3 on sm_100a, 10 on sm_103a; 0 on sm_107a,
+where the grid is the full one).
 
 Opt-in SM reserve of the main backward (keyword ``bwd_reserve_sms``, default
 ``None`` = ``RESERVE_DEFAULT`` = 0, the grid above): ``bwd_reserve_sms=K >= 1``
@@ -189,7 +197,12 @@ launches the single-wave grid less ``K x ctas_per_sm`` CTAs, whatever the last
 channel-tile rank holds, so ``K`` SMs held by kernels of other streams leave the
 backward one wave.  It changes the launch grid only (same programs, ``dx``
 bitwise, ``dweight`` summed the same way); the host cache and graph keys hold
-``K``.  A multi-wave grid (``grid_mult`` > 1) launches unchanged.  On sm_107a
+``K``.  A multi-wave grid (``grid_mult`` > 1) launches unchanged.  On a B200 /
+GB300 key of the L1o route table the default call already leaves 3 / 10 SMs
+free before the exchange's wait; ``K >= 1`` there launches the grid with ``K``
+SMs free after the wait instead (a larger grid while ``K`` is below that
+reserve, the same grid at it), so it adds headroom only for ``K`` above the
+reserve and always gives up the overlap with the exchange.  On sm_107a
 ``K >= 1`` raises ``ValueError`` (:data:`RESERVE_UNSUPPORTED`): there the reserved
 grid costs up to 1.055x the shipped grid unloaded (C 1024, 62585 tokens).
 
@@ -2148,7 +2161,9 @@ def cake_causal_conv1d_nondet_train_kcp_backward(
     launches or exchanges anything.  Preallocated outputs: ``dx`` BF16 of ``x_local``'s shape and ``dweight`` FP32
     ``[C, 4]``, contiguous; ``dx`` and ``dweight`` must be 16-byte aligned (16-byte stores; ``ValueError``
     otherwise).  ``bwd_reserve_sms`` (``None`` = ``RESERVE_DEFAULT``):
-    the main backward's grid gives up that many SMs (:func:`_bwd_grid`); the graph key holds it.  ``ValueError`` for
+    ``K >= 1`` runs the one-program backward after the wait on a grid that gives up ``K`` SMs (:func:`_bwd_grid`; on a
+    B200 / GB300 key of the L1o route table the default call already gives up 3 / 10 SMs before the wait, so ``K``
+    adds headroom there only above that reserve and gives up the overlap); the graph key holds it.  ``ValueError`` for
     ``K >= 1`` on sm_107a (:data:`RESERVE_UNSUPPORTED`) or at the device's SM count or above.  ``dweight_sum``
     (``None`` = ``"fp32"``): ``"fp32_pair"`` runs the overlapped main program's FP32 hi/lo pair build (route
     ``kcp_bwd_dyn_pair``: the accumulator copies of a tile's ``dweight`` summed as an FP32 (hi, lo) pair, rounded
@@ -2684,7 +2699,9 @@ def _dyn_skip(e: dict[str, Any], side: Optional[torch.cuda.Stream]) -> torch.Ten
     the tail-row program runs on the side stream (``side``) beside it, so it leaves the rows that program writes;
     else the all ``-1`` table (every row written, the tail-row program after it on the same stream).  The L1o route's
     state (``"l1o"``) ignores the table: its one-program backward writes every row, and the tail-row program waits
-    for it."""
+    for it.  In a multi call with a key tensor a non-key tensor still gets ``tail_row_off``, but the side stream
+    waits once for every main program on the caller's stream, so its tail-row program runs after them too (the same
+    rows, less overlap)."""
     if side is not None and e["dyn"]["halo"] is not None:
         return e["tail_row_off"]
     return e["dyn"]["no_tail"]
@@ -2979,9 +2996,14 @@ def cake_causal_conv1d_nondet_kcp(
         The main backward here is always one ordinary launch, so ``None`` (default) and
         ``False`` mean the same; ``True`` raises ``ValueError`` and a non-``bool`` ``TypeError``.
     bwd_reserve_sms : int, optional
-        ``None`` (default) = ``RESERVE_DEFAULT`` = 0: the backward grid of :func:`_bwd_grid`.  ``K >= 1``: the main
-        backward launches its single-wave grid less ``K x ctas_per_sm`` CTAs, so it stays one wave while kernels of
-        other streams hold up to ``K`` SMs; it costs the unloaded backward the work of ``K`` SMs.  ``y``, ``dx`` and
+        ``None`` (default) = ``RESERVE_DEFAULT`` = 0: the default route (the overlapped pair; on a key of the L1o
+        route table the one-program backward before the wait with ``kcp_jit.L1O_RESERVE_SMS`` SMs free: 3 on B200,
+        10 on GB300, 0 on VR200; above ``DYN_MAX_CHANNELS`` channels or without tokens the one-program backward
+        after the wait on the grid of :func:`_bwd_grid`).  ``K >= 1``: the one-program backward runs after the wait
+        and launches its single-wave grid less ``K x ctas_per_sm`` CTAs, so it stays one wave while kernels of other
+        streams hold up to ``K`` SMs; it costs the unloaded backward the work of ``K`` SMs.  On a B200 / GB300 key
+        that grid is larger than the default's while ``K`` is below the reserve and the same at it, so ``K`` adds
+        headroom there only above the reserve, and it always gives up the overlap with the exchange.  ``y``, ``dx`` and
         the exchanges are unchanged; ``dweight`` is summed the same way.  ``TypeError`` for a ``bool`` or a
         non-``int``; ``ValueError`` below zero, at the device's SM count or above, or ``K >= 1`` on sm_107a
         (:data:`RESERVE_UNSUPPORTED`: the reserved grid is outside the opt-in's unloaded-cost limit there).  The
@@ -3514,7 +3536,8 @@ def _kcp_backward_multi(
         return dx_out, dw_out
     # The overlapped tensors' main programs run while the exchange is in flight; every other launch follows the wait,
     # on the side stream when the call has one (off the L1o keys the main programs then leave the tail-row programs'
-    # rows; an L1o one-program backward writes them, and the side stream waits for the caller's stream below).
+    # rows; an L1o one-program backward writes them, and the side stream waits for the caller's stream below, before
+    # every tensor's tail-row program, the non-key tensors' included).
     try:
         for (S, C, x_flat, w, dy_flat, hist_t, dx, dw, e), head in zip(
             calls, heads, strict=True
@@ -3537,7 +3560,8 @@ def _kcp_backward_multi(
                 if work is not None:
                     work.wait()
                 if any(c[8]["dyn"] is not None and c[8]["dyn"].get("l1o") for c in calls):
-                    # the L1o route's one-program backwards write the rows the tail-row programs write again
+                    # the L1o route's one-program backwards write the rows the tail-row programs write again; with
+                    # a key tensor in the call the non-key tensors' tail-row programs wait here too (less overlap)
                     side.wait_stream(caller)
                 _multi_after_wait(calls, recv, tails, device, in_place=in_place)
     finally:
