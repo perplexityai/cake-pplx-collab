@@ -32,10 +32,10 @@ limitations under the License.
 #   both.  dK / dV accumulate as integers (see "Deterministic dK / dV" below).
 # * Query heads: the RoPE entries take ``H = q_latent.shape[1]`` heads, ``H`` in
 #   ``SUPPORTED_HEADS`` (64, 96, 128); every ``64`` in a head shape of the RoPE
-#   entries stands for ``H``.  96 and 128 heads run on ``sm_100a`` / ``sm_103a``
-#   (``HEAD_COUNT_ARCHES``), where the record ships the head-count builds; on
-#   ``sm_107a`` another ``H`` than 64 raises ``NotImplementedError``, and the NoPE
-#   program serves 64 heads (see "Query heads" below).
+#   entries stands for ``H``.  96 and 128 heads run on ``sm_100a``, ``sm_103a``
+#   and ``sm_107a`` (``HEAD_COUNT_ARCHES``), where the record ships the head-count
+#   builds; another architecture raises ``NotImplementedError`` for an ``H`` other
+#   than 64, and the NoPE program serves 64 heads (see "Query heads" below).
 # * Strided inputs are consumed in place: the query operands and ``dout``
 #   reach the kernels through TMA descriptors encoded from the tensor's own
 #   head and token strides (the delta stage takes the same strides as
@@ -200,7 +200,7 @@ NUM_HEADS = 64
 # Query heads of the RoPE program (see "Query heads" above): 64, and 96 / 128 on ``HEAD_COUNT_ARCHES`` where the
 # record ships the head-count builds (``cake_jit.HEAD_COUNT_STAGES``).  The NoPE program serves 64.
 SUPPORTED_HEADS = (64, 96, 128)
-HEAD_COUNT_ARCHES = ("sm_100a", "sm_103a")
+HEAD_COUNT_ARCHES = ("sm_100a", "sm_103a", "sm_107a")
 # The work items per token of a head-window launch (both 64-head windows) and its window selector (-1: both).
 HEAD_WINDOW_ITEMS = 2
 HEAD_WINDOW_BOTH = -1
@@ -775,8 +775,8 @@ def num_query_heads(q_latent: torch.Tensor) -> int:
 
 
 def _check_head_arch(num_heads: int, arch: Optional[str]) -> None:
-    """``NotImplementedError`` for ``H > 64`` on an architecture outside ``HEAD_COUNT_ARCHES`` (``sm_107a`` serves 64
-    query heads until its head-count builds are validated)."""
+    """``NotImplementedError`` for ``H > 64`` on an architecture outside ``HEAD_COUNT_ARCHES`` (or without a supported
+    device, ``arch`` ``None``)."""
     if int(num_heads) != NUM_HEADS and arch not in HEAD_COUNT_ARCHES:
         raise NotImplementedError(
             f"{int(num_heads)} query heads are served on {list(HEAD_COUNT_ARCHES)}; "
@@ -2212,7 +2212,8 @@ def _plan(
     arch = arch_for(device)
     stages = cake_jit.registered_stages()
     H = num_query_heads(q_latent)
-    # above 64 heads: the head-count builds of this architecture (NotImplementedError on sm_107a or without them)
+    # above 64 heads: the head-count builds of this architecture (NotImplementedError outside HEAD_COUNT_ARCHES or
+    # without them)
     swap = head_count_stages(H, arch, backward=backward)
     if backward and not generated_program_available(device, backward=True):
         raise NotImplementedError(

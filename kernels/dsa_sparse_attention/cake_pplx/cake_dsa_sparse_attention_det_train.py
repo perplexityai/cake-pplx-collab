@@ -19,8 +19,7 @@ stable entry points over the backend package
 ``cake_pplx._backends.cake_dsa_sparse_attention_det_train``.
 
 Query heads: the rope entries take ``H = q_latent.shape[1]`` heads, ``H`` in
-64, 96 and 128 (96 and 128 on SM100 / SM103; SM107 serves 64 and raises
-``NotImplementedError`` for another ``H``); every head tensor below written
+64, 96 and 128 on SM100 / SM103 / SM107; every head tensor below written
 ``[T, 64, ...]`` is ``[T, H, ...]`` for them.  The kernels compute 64 heads of
 a token per work item: above 64 heads the forward runs the single-pass forward
 (every head of a token in one 2-CTA cluster) and the backward the head-window
@@ -239,9 +238,8 @@ def cake_dsa_sparse_attention_det(
     num_segments: int = 1,
 ):
     r"""Differentiable top-k sparse MLA attention with absorbed queries (DeepSeek
-    Sparse Attention) for training, ``H`` query heads (64 on SM100 / SM103 /
-    SM107; 96 or 128 on SM100 / SM103), SM100 / SM103 / SM107 only; every
-    output repeats bit for bit.
+    Sparse Attention) for training, ``H`` query heads (64, 96 or 128), SM100 /
+    SM103 / SM107 only; every output repeats bit for bit.
 
     ``O = softmax(softmax_scale * (q_rope . k_rope^T + q_latent . kv_latent^T)) . kv_latent``
     over the keys a row's ``indices`` select (K = V = the latent).
@@ -259,8 +257,7 @@ def cake_dsa_sparse_attention_det(
     q_latent : torch.Tensor
         BF16 ``[T, H, 512]`` absorbed query latents, ``H`` in 64, 96 or 128
         (the call's head count); contiguous or a view of a packed ``[T, H,
-        576]`` query (head stride 576).  Another ``H`` raises ``ValueError``;
-        96 or 128 heads on SM107 raise ``NotImplementedError``.
+        576]`` query (head stride 576).  Another ``H`` raises ``ValueError``.
     q_rope : torch.Tensor
         BF16 ``[T, H, 64]`` query rope part; contiguous, a view of the packed
         ``[T, H, 576]`` query, or the ``192:256`` channel slice of the

@@ -3,9 +3,9 @@
 Backend package of `cake_pplx.cake_dsa_sparse_attention_det_train`, the
 deterministic package of the native DeepSeek Sparse Attention training kernels
 (top-k sparse MLA with absorbed queries; 512 latent + 64 rope query/key
-dimensions, 512 value dimensions).  The rope program takes 64 query heads on
-every architecture and 96 or 128 on `sm_100a` / `sm_103a` (see "96 and 128
-query heads"); the NoPE program takes 64.
+dimensions, 512 value dimensions).  The rope program takes 64, 96 or 128 query
+heads on every architecture (see "96 and 128 query heads"); the NoPE program
+takes 64.
 
 The entry points of `cake_pplx.cake_dsa_sparse_attention_det_train` are stable
 APIs; this backend package is experimental (no compatibility guarantee for its
@@ -372,14 +372,15 @@ non-deterministic package (see its README, "Trainable per-head sink"):
 ## 96 and 128 query heads
 
 The kernels compute 64 query heads of a token per work item.  A rope call over
-`H` = 96 or 128 heads (`cake_backend.SUPPORTED_HEADS`) runs, on `sm_100a` and
-`sm_103a` (`cake_backend.HEAD_COUNT_ARCHES`), the head-count builds of the
-record (`cake_jit.HEAD_COUNT_STAGES`, `cake_backend.head_count_stages`) in
-place of five stages; a 64-head call launches what it launched before (same
-stages, grids and arguments).  On `sm_107a` such a call raises
-`NotImplementedError` before any launch (also without query rows, on CUDA
-tensors), as the non-deterministic package does; the NoPE program refuses 96
-and 128 heads with `ValueError` naming the rope form.
+`H` = 96 or 128 heads (`cake_backend.SUPPORTED_HEADS`) runs, on `sm_100a`,
+`sm_103a` and `sm_107a` (`cake_backend.HEAD_COUNT_ARCHES`), the head-count
+builds of the record (`cake_jit.HEAD_COUNT_STAGES`,
+`cake_backend.head_count_stages`) in place of five stages; a 64-head call
+launches what it launched before (same stages, grids and arguments).  Without
+one of the builds for the device's architecture (or on another architecture)
+such a call raises `NotImplementedError` before any launch (also without query
+rows, on CUDA tensors); the NoPE program refuses 96 and 128 heads with
+`ValueError` naming the rope form.
 
 | 64-head stage | Head-count build | Launch |
 |---|---|---|
@@ -393,10 +394,10 @@ The head-window builds read the caller's `[T, H, *]` tensors through tensor
 maps whose head extent is `H`: the rows of `W1 = [64, 128)` past `H` load
 zeros, store nothing and read `lse = +inf`, `delta = 0`, so they add exactly
 0.  `token_base` / `token_step` count items: descending from `2 T - 1` where
-`cake_backend.token_order` descends (one key pass on `sm_103a`), else
-ascending from item 0.  A (token, key) pair adds one contribution per window
-to its row, so the builds skip the overflow counter below `tau / 2`: the
-skipped contributions add at most `N tau`, the slack of the redo
+`cake_backend.token_order` descends (one key pass on `sm_103a` and `sm_107a`),
+else ascending from item 0.  A (token, key) pair adds one contribution per
+window to its row, so the builds skip the overflow counter below `tau / 2`:
+the skipped contributions add at most `N tau`, the slack of the redo
 preparation's flag rule, and the counters certify the int32 range as at 64
 heads.  The key norms, the row bound and its grid (over `T * topk` pair
 slots: the pack / pack27 choice reads `T`), the redo preparation, the fold and
@@ -462,7 +463,7 @@ or a compute capability 10.0 / 10.3 / 10.7 device),
 public entry points and the environment variables of the facade),
 `tests/experimental/test_cake_dsa_sparse_attention_det_train_heads.py` (96 and
 128 query heads: the host plans on the CPU, the naive tier and the bitwise
-repeats on `sm_100a` / `sm_103a`) and the
+repeats on `sm_100a` / `sm_103a` / `sm_107a`) and the
 CPU-only `tests/experimental/test_cake_dsa_sparse_attention_det_train_names.py`
 and `tests/experimental/test_cake_dsa_sparse_attention_det_train_standalone.py`.
 Accuracy is judged by `tests/cake_naive.py` through

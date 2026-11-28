@@ -287,7 +287,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "fwd_h128": {
             "library": "cake_dsa_h64_det_train_adfe34021dbfb2cffe71",
             "ffi_entry": "run",
-            "arches": ["sm_100a", "sm_103a"],
+            "arches": ["sm_100a", "sm_103a", "sm_107a"],
             "launch": {
                 "block": [512, 1, 1],
                 "cluster": [2, 1, 1],
@@ -299,7 +299,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "bwd_delta_heads": {
             "library": "cake_dsa_h64_det_train_aac0a985a678f748245c",
             "ffi_entry": "run",
-            "arches": ["sm_100a", "sm_103a"],
+            "arches": ["sm_100a", "sm_103a", "sm_107a"],
             "launch": {
                 "block": [512, 1, 1],
                 "cluster": [1, 1, 1],
@@ -311,7 +311,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "bwd_main_hw": {
             "library": "cake_dsa_h64_det_train_f2912bada9840c99c4da",
             "ffi_entry": "run",
-            "arches": ["sm_100a", "sm_103a"],
+            "arches": ["sm_100a", "sm_103a", "sm_107a"],
             "launch": {
                 "block": [640, 1, 1],
                 "cluster": [1, 1, 1],
@@ -323,7 +323,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "bwd_redo_hw": {
             "library": "cake_dsa_h64_det_train_9f1f44a507ca9dc8ce87",
             "ffi_entry": "run",
-            "arches": ["sm_100a", "sm_103a"],
+            "arches": ["sm_100a", "sm_103a", "sm_107a"],
             "launch": {
                 "block": [640, 1, 1],
                 "cluster": [1, 1, 1],
@@ -335,7 +335,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "bwd_main_pass_hw": {
             "library": "cake_dsa_h64_det_train_91a238d5123ae4182d1c",
             "ffi_entry": "run",
-            "arches": ["sm_100a", "sm_103a"],
+            "arches": ["sm_100a", "sm_103a", "sm_107a"],
             "launch": {
                 "block": [640, 1, 1],
                 "cluster": [1, 1, 1],
@@ -745,7 +745,7 @@ NOPE_SINK_FORWARD_STAGE = "nope_fwd_sink"
 NOPE_DSINK_STAGE = "nope_bwd_dsink"
 NOPE_SINK_STAGES = (NOPE_SINK_FORWARD_STAGE, NOPE_DSINK_STAGE)
 # The RoPE program's stages over 96 and 128 query heads (``cake_backend.SUPPORTED_HEADS``), registered for
-# ``sm_100a`` and ``sm_103a`` (their entries' ``arches``): stage -> the stage a call over ``64 < H <= 128`` heads runs
+# ``sm_100a``, ``sm_103a`` and ``sm_107a`` (``arches``): stage -> the stage a call over ``64 < H <= 128`` heads runs
 # in its place.  The forward is the non-deterministic package's single-pass forward (one (2, 1, 1) cluster per
 # token, every head of the token: ``out`` / ``lse`` / ``o_lo`` at ``t * H + h``); the delta stage's heads build
 # writes ``delta [T, H]`` and the bound terms over the token's H heads; the main kernel's head-window builds (main,

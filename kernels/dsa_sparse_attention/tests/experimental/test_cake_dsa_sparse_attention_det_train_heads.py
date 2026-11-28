@@ -15,23 +15,25 @@ limitations under the License.
 
 The deterministic package's RoPE form at 96 and 128 query heads (and its 64-head plans).
 
-On sm_100a / sm_103a a call over ``H`` = 96 or 128 heads runs the head-count builds of the record
+On sm_100a / sm_103a / sm_107a a call over ``H`` = 96 or 128 heads runs the head-count builds of the record
 (``cake_jit.HEAD_COUNT_STAGES``): the single-pass forward ``fwd_h128``, the delta stage's heads build
 ``bwd_delta_heads`` (``delta [T, H]``) and the main kernel's head-window builds ``bwd_main_hw`` / ``bwd_redo_hw`` /
 ``bwd_main_pass_hw`` (both 64-head windows of every token in one launch: ``2 T`` work items, window selector -1).  The
 key norms, the row bound and its grid, the redo preparation, the fold and the compaction run over the ``T`` tokens
-unchanged.  sm_107a and the NoPE program serve 64 heads.
+unchanged.  The NoPE program serves 64 heads.
 
 Host tests (CPU, no device; the planners see the architecture and SM count a test stands in, and every launch goes
 through its generated launcher into a recorder): the records of the five builds; 64-head plans and launches equal with
 and without the builds registered; above 64 heads the stage order, the grids (``fwd_h128``'s persistent grid, one CTA
 per item for the main and pass builds, the redo's persistent grid over ``2 T`` items) and the launch values (head
-count, window selector, item order, ``[T, H]`` operands); the pack / pack27 choice from ``T * topk``; the key-pass
-token chunk and the workspace (``2 T`` dQ partial blocks of 36,864 FP32, ``delta [T, H]``); validation; the refusals
-on sm_107a and without the builds; calls without query rows.  Device tests (sm_100a / sm_103a): every floating output
+count, window selector, item order, ``[T, H]`` operands) on every architecture; the pack / pack27 choice from
+``T * topk``; the key-pass token chunk and the sm_107a key-pass rule; the workspace (``2 T`` dQ partial blocks of 36,864
+FP32, ``delta [T, H]``); validation; the architecture rule, the refusals without the builds (also a registry without
+the sm_107a builds) and calls without query rows.  Device tests (sm_100a / sm_103a / sm_107a): every floating output
 against the FP64 oracle at the naive BF16 tier (``tests/cake_naive.py``), and bit-for-bit repeats -- eager, autograd,
 the prepared runner and its CUDA-graph replay, dK / dV over 1, 2 and 3 key passes, the forward over other grids, and a
-forced redo of most rows over its persistent and a per-item grid.  "Bitwise" is bit-pattern equality (integer views).
+forced redo of most rows over its persistent and a per-item grid; on sm_107a the plan on the device's SM count.
+"Bitwise" is bit-pattern equality (integer views).
 """
 
 import contextlib
@@ -61,7 +63,9 @@ D_ROPE = cake_backend.D_ROPE
 D_QK = cake_backend.D_QK
 SUPPORTED_COMPUTE_CAPABILITIES = cake_backend.SUPPORTED_COMPUTE_CAPABILITIES
 HEAD_COUNT_STAGES = cake_jit.HEAD_COUNT_STAGES
-HEAD_COUNT_ARCHES = ("sm_100a", "sm_103a")
+HEAD_COUNT_ARCHES = ("sm_100a", "sm_103a", "sm_107a")
+#: The architectures whose main launches walk the items down with one key pass (``DESCENDING_TOKEN_PLANS``).
+DESCENDING_ARCHES = ("sm_103a", "sm_107a")
 #: FP32 elements of one dQ partial block (one 64-head work item: 64 x 576).
 DQ_BLOCK = NUM_HEADS * D_QK
 SEED = 20261126
@@ -192,7 +196,7 @@ def _runner_case(inp, *, key_passes=None, accumulate=False, **kw):
 
 
 def test_head_count_records_are_the_builds_the_backend_launches():
-    """The record registers the five head-count builds after its other stages, for sm_100a and sm_103a only, each
+    """The record registers the five head-count builds after its other stages, for sm_100a, sm_103a and sm_107a, each
     with a generated launcher and grid.  ``fwd_h128`` is the non-deterministic package's single-pass forward (the
     same kernel identity, launch shape and arguments); the head-window builds take the arguments of their 64-head
     stage plus ``num_heads`` and ``wsel``, the heads delta those of the 64-head delta plus ``num_heads``."""
@@ -307,9 +311,9 @@ def test_head_count_plan_launches(monkeypatch, arch, heads, passes, accumulate):
     ``2 * min(T, SMs // 2)``; the heads delta one CTA per token; the main and pass builds one CTA per work item
     (``2 T``); the redo ``redo_launch_grid(2 T, SMs)``; every other stage the grid of a 64-head plan of the same
     ``T``.  Values: ``num_heads = H`` and ``wsel = -1`` where the build takes them; ``num_queries`` / ``num_tokens`` =
-    ``T``; the main and redo items descending from ``2 T - 1`` on sm_103a with one pass, else ascending from 0 (the
-    compaction from token 0); ``lse`` / ``delta`` ``[T, H]``; dQ ``[T, H, *]``; the pass dQ partial ``2 T`` blocks of
-    36,864 FP32."""
+    ``T``; the main and redo items descending from ``2 T - 1`` on sm_103a and sm_107a with one pass, else ascending
+    from 0 (the compaction from token 0); ``lse`` / ``delta`` ``[T, H]``; dQ ``[T, H, *]``; the pass dQ partial
+    ``2 T`` blocks of 36,864 FP32."""
     T, S, topk = 40, 96, 16
     host = _Host(monkeypatch, arch)
     inp = _host_inputs(T, S, topk, heads)
@@ -343,7 +347,7 @@ def test_head_count_plan_launches(monkeypatch, arch, heads, passes, accumulate):
         stage = key[0] if isinstance(key, tuple) else key
         if stage not in cake_jit.HEAD_COUNT_STAGES.values():
             assert grid == base[key], key
-    descending = passes == 1 and arch == "sm_103a"
+    descending = passes == 1 and arch in DESCENDING_ARCHES
     order = (2 * T - 1, -1) if descending else (0, 1)
     for stage, values in host.launches:
         if "num_heads" in cake_launch.STAGE_ARGS[stage]:
@@ -492,14 +496,36 @@ def test_key_pass_token_chunk_counts_two_blocks_per_token(monkeypatch):
         ), (heads, T)
 
 
+def test_sm107a_key_pass_rule_above_64_heads(monkeypatch):
+    """On sm_107a the record's rule (two passes for a one-chunk row of at least 131,072 keys) holds above 64 heads
+    within the head-window token chunk (2176 tokens at top-k 2048): 2176 tokens over 131,072 keys take two passes at
+    64 heads and above, 2177 tokens two at 64 heads and one above (a row longer than the chunk), and 131,071 keys
+    one."""
+    _Host(monkeypatch, "sm_107a")
+    record = cake_jit.record()
+    stages = cake_jit.registered_stages()
+    items = cake_backend.HEAD_WINDOW_ITEMS
+
+    def passes(T, S, n):
+        return cake_backend.plan_key_passes(
+            record, stages, T, S, TOPK, arch="sm_107a", items_per_token=n
+        )
+
+    assert passes(2176, 131072, 1) == passes(2176, 131072, items) == 2
+    assert passes(2177, 131072, 1) == 2
+    assert passes(2177, 131072, items) == 1
+    assert passes(2176, 131071, 1) == passes(2176, 131071, items) == 1
+
+
 @pytest.mark.parametrize("passes", (1, 2))
 @pytest.mark.parametrize("heads", (96, 128))
-def test_head_count_workspace(monkeypatch, heads, passes):
+@pytest.mark.parametrize("arch", HEAD_COUNT_ARCHES)
+def test_head_count_workspace(monkeypatch, arch, heads, passes):
     """The workspace above 64 heads: ``delta [T, H]`` FP32 (where it does not fit the fresh dK/dV output), and with
     key passes ``2 T`` dQ partial blocks of 36,864 FP32 (147,456 B per work item, not ``H * 2304`` B per token).
     ``dsa_train_workspace_size(num_heads=H)`` is the prepared runner's layout."""
     T, S, topk = 40, 96, 16
-    _Host(monkeypatch, "sm_103a")
+    _Host(monkeypatch, arch)
     inp = _host_inputs(T, S, topk, heads)
     for accumulate in (False, True):
         runner = _runner_case(inp, key_passes=passes, accumulate=accumulate)
@@ -553,42 +579,119 @@ def test_head_count_storage_scales_with_the_heads():
 
 
 @pytest.mark.parametrize("heads", (96, 128))
-def test_sm107a_refuses_more_than_64_heads(monkeypatch, heads):
-    """On sm_107a 96 and 128 heads are refused before any stage is resolved -- eager forward and backward, the
-    autograd entries (flat and packed), ``prepare_dsa_train`` and the workspace size, and a CUDA call without query
-    rows -- with the non-deterministic package's error text; 64 heads plan as before."""
+def test_sm107a_serves_more_than_64_heads(monkeypatch, heads):
+    """On sm_107a 96 and 128 heads run the head-count builds, as on sm_100a / sm_103a: the eager forward and
+    backward, the autograd entries (flat and packed) and ``prepare_dsa_train`` plan them, the workspace size takes
+    them, and a CUDA call without query rows returns its empty outputs without launching; 64 heads plan as before."""
     host = _Host(monkeypatch, "sm_107a")
     inp = _host_inputs(8, 64, 16, heads)
-    refused = "sm_107a serves 64 query heads only"
-    zeros = torch.zeros(8, heads, D_LATENT, dtype=torch.bfloat16)
-    lse = torch.zeros(8, heads)
-    with pytest.raises(NotImplementedError, match=refused):
-        cake_backend.forward(*_args(inp))
-    with pytest.raises(NotImplementedError, match=refused):
-        cake_backend.backward(*_args(inp), zeros, zeros, lse, inp.dout)
+    backward = list(_expected_order(1, False))
+    out, lse, o_lo = cake_backend.forward(*_args(inp))
+    assert host.stages() == ["fwd_h128"]
+    assert tuple(out.shape) == (8, heads, D_LATENT) and tuple(lse.shape) == (8, heads)
+    cake_backend.backward(*_args(inp), out, o_lo, lse, inp.dout)
+    assert host.stages() == ["fwd_h128"] + backward
+    mark = len(host.launches)
     leaves = [t.clone().requires_grad_() for t in _args(inp)[:4]]
-    with pytest.raises(NotImplementedError, match=refused):
-        cake_backend.cake_dsa_sparse_attention_det(*leaves, inp.indices)
+    got = cake_backend.cake_dsa_sparse_attention_det(*leaves, inp.indices)
+    got.backward(inp.dout)
+    assert host.stages()[mark:] == ["fwd_h128"] + backward
     cu_q = torch.tensor([0, 3, 8], dtype=torch.int32)
     cu_k = torch.tensor([0, 24, 64], dtype=torch.int32)
     monkeypatch.setattr(
         cake_backend, "nope_index_prep_available", lambda device=None: False
     )
-    with pytest.raises(NotImplementedError, match=refused):
-        cake_backend.cake_dsa_sparse_attention_det_varlen(
-            *leaves, inp.indices % 24, cu_q, cu_k, causal=True
-        )
-    with pytest.raises(NotImplementedError, match=refused):
-        cake_backend.prepare_dsa_train(*_args(inp), dout=inp.dout)
-    with pytest.raises(NotImplementedError, match=refused):
-        cake_backend.dsa_train_workspace_size(8, 64, 16, num_heads=heads)
+    mark = len(host.launches)
+    leaves = [t.clone().requires_grad_() for t in _args(inp)[:4]]
+    got = cake_backend.cake_dsa_sparse_attention_det_varlen(
+        *leaves, inp.indices % 24, cu_q, cu_k, causal=True
+    )
+    assert tuple(got.shape) == (8, heads, D_LATENT)
+    assert host.stages()[mark:] == ["fwd_h128"]
+    runner = cake_backend.prepare_dsa_train(*_args(inp), dout=inp.dout)
+    assert runner.num_heads == heads and runner.forward_stages == ("fwd_h128",)
+    assert runner.backward_order == _expected_order(1, False)
+    assert cake_backend.dsa_train_workspace_size(8, 64, 16, num_heads=heads) > 0
+    mark = len(host.launches)
     empty = _host_inputs(0, 64, 16, heads)
-    with pytest.raises(NotImplementedError, match=refused):
-        cake_backend.forward(*_args(empty))
-    assert not host.launches
+    out, lse, o_lo = cake_backend.forward(*_args(empty))
+    assert tuple(out.shape) == (0, heads, D_LATENT) and tuple(lse.shape) == (0, heads)
+    assert len(host.launches) == mark
     small = _host_inputs(8, 64, 16, NUM_HEADS)
     cake_backend.forward(*_args(small))
+    assert host.stages()[mark:] == ["fwd"]
+
+
+def _without_sm107a_builds(monkeypatch):
+    """The registry as it was before the sm_107a head-count builds: each of the five builds declared for sm_100a and
+    sm_103a only."""
+    real_record = cake_jit.record
+
+    def record(program=cake_jit.PROGRAM):
+        rec = real_record(program)
+        if program != cake_jit.PROGRAM:
+            return rec
+        rec = dict(rec)
+        for build in HEAD_COUNT_STAGES.values():
+            rec[build] = dict(rec[build], arches=["sm_100a", "sm_103a"])
+        return rec
+
+    monkeypatch.setattr(cake_jit, "record", record)
+
+
+@pytest.mark.parametrize("heads", (96, 128))
+def test_sm107a_refuses_more_heads_when_the_registry_lacks_its_builds(
+    monkeypatch, heads
+):
+    """A registry that declares the head-count builds for sm_100a and sm_103a only refuses 96 and 128 heads on
+    sm_107a before any launch -- eager forward and backward, the autograd entry, ``prepare_dsa_train`` and the
+    workspace size -- with ``NotImplementedError`` naming the missing build; sm_100a still runs them, and 64 heads
+    plan as before on sm_107a."""
+    _without_sm107a_builds(monkeypatch)
+    host = _Host(monkeypatch, "sm_107a")
+    assert "sm_107a" not in cake_jit.stage_arches("fwd_h128")
+    inp = _host_inputs(8, 64, 16, heads)
+    missing = r"need the build 'fwd_h128' .* for sm_107a"
+    zeros = torch.zeros(8, heads, D_LATENT, dtype=torch.bfloat16)
+    lse = torch.zeros(8, heads)
+    with pytest.raises(NotImplementedError, match=missing):
+        cake_backend.forward(*_args(inp))
+    with pytest.raises(NotImplementedError, match=missing):
+        cake_backend.backward(*_args(inp), zeros, zeros, lse, inp.dout)
+    leaves = [t.clone().requires_grad_() for t in _args(inp)[:4]]
+    with pytest.raises(NotImplementedError, match=missing):
+        cake_backend.cake_dsa_sparse_attention_det(*leaves, inp.indices)
+    with pytest.raises(NotImplementedError, match=missing):
+        cake_backend.prepare_dsa_train(*_args(inp), dout=inp.dout)
+    with pytest.raises(NotImplementedError, match=missing):
+        cake_backend.dsa_train_workspace_size(8, 64, 16, num_heads=heads)
+    assert not host.launches
+    cake_backend.forward(*_args(_host_inputs(8, 64, 16, NUM_HEADS)))
     assert host.stages() == ["fwd"]
+    with monkeypatch.context() as mp:
+        served = _Host(mp, "sm_100a")
+        cake_backend.forward(*_args(inp))
+        assert served.stages() == ["fwd_h128"]
+
+
+def test_more_heads_need_a_head_count_arch():
+    """``HEAD_COUNT_ARCHES`` (sm_100a, sm_103a, sm_107a: every supported architecture) serve 96 and 128 heads;
+    another architecture, or no supported device (``None``), is refused with ``NotImplementedError`` naming them, and
+    64 heads are never refused by this rule."""
+    assert cake_backend.HEAD_COUNT_ARCHES == HEAD_COUNT_ARCHES
+    assert set(HEAD_COUNT_ARCHES) == set(SUPPORTED_COMPUTE_CAPABILITIES.values())
+    for heads in (64, 96, 128):
+        for arch in HEAD_COUNT_ARCHES:
+            cake_backend._check_head_arch(heads, arch)
+        for arch in ("sm_90a", "sm_120a", None):
+            if heads == NUM_HEADS:
+                cake_backend._check_head_arch(heads, arch)
+                continue
+            with pytest.raises(
+                NotImplementedError, match="serves 64 query heads only"
+            ) as err:
+                cake_backend._check_head_arch(heads, arch)
+            assert "'sm_107a'" in str(err.value), str(err.value)
 
 
 @pytest.mark.parametrize("arch", HEAD_COUNT_ARCHES)
@@ -666,10 +769,13 @@ def test_validate_rejects_mismatched_head_counts(q_heads, rope_heads, dout_heads
 
 
 @pytest.mark.parametrize("heads", (96, 128))
-def test_zero_query_rows_return_empty_outputs_without_launching(monkeypatch, heads):
+@pytest.mark.parametrize("arch", HEAD_COUNT_ARCHES)
+def test_zero_query_rows_return_empty_outputs_without_launching(
+    monkeypatch, arch, heads
+):
     """A call without query rows returns ``[0, H, *]`` outputs and zero key gradients without planning or
-    launching (on sm_100a / sm_103a; sm_107a refuses, :func:`test_sm107a_refuses_more_than_64_heads`)."""
-    host = _Host(monkeypatch, "sm_100a")
+    launching."""
+    host = _Host(monkeypatch, arch)
     inp = _host_inputs(0, 64, 16, heads)
     out, lse, o_lo = cake_backend.forward(*_args(inp))
     assert tuple(out.shape) == (0, heads, D_LATENT)
@@ -683,7 +789,7 @@ def test_zero_query_rows_return_empty_outputs_without_launching(monkeypatch, hea
 
 
 # ---------------------------------------------------------------------------
-# Device tests (sm_100a / sm_103a at 96 and 128 heads)
+# Device tests (96 and 128 heads on sm_100a / sm_103a / sm_107a)
 # ---------------------------------------------------------------------------
 
 
@@ -694,8 +800,8 @@ def _device_supported() -> bool:
 
 
 def _require_heads(heads: int, *, backward: bool = True) -> None:
-    """A device whose architecture serves ``heads`` query heads (skip otherwise); on sm_100a / sm_103a the registry
-    must carry the head-count builds (a missing build fails the test instead of skipping it)."""
+    """A device whose architecture serves ``heads`` query heads (skip otherwise); on ``HEAD_COUNT_ARCHES`` the
+    registry must carry the head-count builds (a missing build fails the test instead of skipping it)."""
     if not _device_supported():
         pytest.skip("requires a compute capability 10.0 / 10.3 / 10.7 device")
     device = torch.device("cuda")
@@ -703,7 +809,7 @@ def _require_heads(heads: int, *, backward: bool = True) -> None:
         pytest.skip("generated DSA training program not registered for this device")
     arch = cake_backend.arch_for(device)
     if heads != NUM_HEADS and arch not in HEAD_COUNT_ARCHES:
-        pytest.skip("96 and 128 query heads ship on sm_100a / sm_103a")
+        pytest.skip("96 and 128 query heads ship on sm_100a / sm_103a / sm_107a")
     cake_backend.head_count_stages(heads, arch, backward=backward)
 
 
@@ -938,14 +1044,36 @@ def test_heads_forced_redo_repeats_over_both_redo_grids(monkeypatch, heads):
         assert _same_bits(a, b)
 
 
-def test_sm107a_device_refuses_more_than_64_heads():
-    """On an sm_107a device a 96-head call raises ``NotImplementedError`` before any launch."""
+@pytest.mark.parametrize("heads", (96, 128))
+def test_sm107a_device_plans_the_head_count_builds(heads):
+    """On an sm_107a device a call over 96 or 128 heads binds the head-count builds on the device's SM count: the
+    single-pass forward on ``2 * min(T, SMs // 2)`` CTAs, the heads delta one CTA per token, the head-window main one
+    CTA per item (``2 T``) and the redo ``min(2 T, SMs)`` CTAs, both walking the items down from ``2 T - 1`` (one key
+    pass), ``num_heads = H`` and ``wsel = -1``; its steps repeat bit for bit."""
     if (
         not _device_supported()
         or cake_backend.arch_for(torch.device("cuda")) != "sm_107a"
     ):
         pytest.skip("requires an sm_107a device")
-    inp = make_inputs([64], [512], seed=SEED + 5, topk=128, heads=96)
+    _require_heads(heads)
+    inp = make_inputs([300], [2048], seed=SEED + 5, topk=512, heads=heads)
     args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global)
-    with pytest.raises(NotImplementedError, match="sm_107a serves 64 query heads only"):
-        cake_backend.forward(*args)
+    T = inp.total_q
+    sms = torch.cuda.get_device_properties(0).multi_processor_count
+    runner = cake_backend.prepare_dsa_train(
+        *args, topk_length=inp.topk_length, dout=inp.dout, softmax_scale=SCALE
+    )
+    assert runner.forward_stages == ("fwd_h128",) and runner.key_passes == 1
+    grids = {k: tuple(v.grid) for k, v in runner.launches.items()}
+    assert grids["fwd_h128"] == (2 * min(T, sms // 2), 1, 1)
+    assert grids["bwd_delta_heads"] == (T, 1, 1)
+    assert grids["bwd_main_hw"] == (2 * T, 1, 1)
+    assert grids["bwd_redo_hw"] == (min(2 * T, sms), 1, 1)
+    for stage in ("bwd_main_hw", "bwd_redo_hw"):
+        values = runner.launches[stage].values
+        assert (values["token_base"], values["token_step"]) == (2 * T - 1, -1), stage
+        assert values["num_heads"] == heads and values["wsel"] == -1, stage
+    first = [t.clone() for t in runner.step()]
+    for _ in range(REPEATS - 1):
+        for a, b in zip(runner.step(), first, strict=True):
+            assert _same_bits(a, b)
