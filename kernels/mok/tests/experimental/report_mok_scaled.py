@@ -18,7 +18,7 @@ a test (no pass or fail; pytest does not collect it).  The workspace and the sta
 separately, since a caller sizes them differently: the workspace once per EP group and adapter, the retained state once
 per layer.
 
-Run from the directory that holds ``tests`` on an SM100a or SM103a GPU::
+Run from the directory that holds ``tests`` on an SM100a, SM103a or SM107a GPU::
 
     python -m tests.experimental.report_mok_scaled --tokens 32768 --hidden 4096 --intermediate 1024 --out report.txt
 

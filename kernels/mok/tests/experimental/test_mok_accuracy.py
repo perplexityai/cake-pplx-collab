@@ -28,8 +28,8 @@ distribution at hidden 5120 / intermediate 2304 over 6 and 48 local experts
 the adapter's top-6 step at each 384-expert layout as rank 0 of its EP group emulated on one GPU
 (:mod:`tests.experimental._mok_one_gpu`; ``y``, ``dx`` and the router-weight gradients), and at the EP64 and EP8 layouts
 over changing source counts on one workspace (padded and unpadded staging; also the shared weight gradients).  The
-512-expert top-10 group (``router_weight_gradient="direct"``, ``shared_expert="scaled"``) on SM100a and SM103a, on
-inputs drawn on the CPU: the shared scale's dot helper, the scaled forward epilogue (``s`` in {0, 1, U}) and the
+512-expert top-10 group (``router_weight_gradient="direct"``, ``shared_expert="scaled"``) on SM100a, SM103a and SM107a,
+on inputs drawn on the CPU: the shared scale's dot helper, the scaled forward epilogue (``s`` in {0, 1, U}) and the
 adapter's step at EP8 ``(8, 64)`` emulated on one GPU (``y``, ``dx``, the router-weight gradients and those at zero
 weights alone, ``d_shared_scale`` and the shared weight gradients).
 
@@ -1024,8 +1024,8 @@ GROUP_ROLES = (
 
 
 def _require_group():
-    """Skip on a target without the 512-expert top-10 group's kernels (``MODE_GROUPS["scaled_top10"].targets``: SM100a
-    and SM103a) or while they are not in this package's registry (``test_mok_bf16.py`` fails for that)."""
+    """Skip on a target without the 512-expert top-10 group's kernels (``MODE_GROUPS["scaled_top10"].targets``: SM100a,
+    SM103a and SM107a) or while they are not in this package's registry (``test_mok_bf16.py`` fails for that)."""
     require_gpu()
     arch = gaps.TARGETS[torch.cuda.get_device_capability()]
     if arch not in GROUP.targets:
@@ -1281,8 +1281,8 @@ SITU_TINY_LOG2 = (-34.0, -14.0)
 
 
 def _require_situ_group():
-    """Skip on a target without the 896-expert top-16 group's kernels (``MODE_GROUPS["situ_top16"].targets``: SM100a
-    and SM103a) or while they are not in this package's registry (``test_mok_bf16.py`` fails for that)."""
+    """Skip on a target without the 896-expert top-16 group's kernels (``MODE_GROUPS["situ_top16"].targets``: SM100a,
+    SM103a and SM107a) or while they are not in this package's registry (``test_mok_bf16.py`` fails for that)."""
     require_gpu()
     arch = gaps.TARGETS[torch.cuda.get_device_capability()]
     if arch not in SITU_GROUP.targets:

@@ -23,7 +23,8 @@ and `sm_107a`; `recompute_forward_context` then takes the router weights. The ex
 `router_weight_gradient="direct"` (a router-weight gradient `dot(dh, h)` from the unscaled `dy`, defined at a zero
 weight) and `shared_expert="scaled"` (a per-token FP32 shared-expert scale `s`, `y = s * S(x) + sum_k w_k E_k(x)`,
 with its gradient as a ninth `backward` item) run 512 routed experts at EP8 `(8, 64)`, top-k 10, plain SwiGLU,
-FP32 weight gradients and BF16 routed weights on `sm_100a` and `sm_103a`; their defaults keep every earlier bit.
+FP32 weight gradients and BF16 routed weights on `sm_100a`, `sm_103a` and `sm_107a`; their defaults keep every
+earlier bit.
 With MXFP8 routed experts, two options are off by default (section MXFP8 options):
 `quantize_mok_mxfp8_weights(..., blocks="32x32")` gives each 32 x 32 block of a routed weight one scale byte, so the
 backward GEMMs read the forward's dequantized weight; `prepare_mok_bf16(mxfp8_transposed="requantized")` forms the
@@ -48,7 +49,7 @@ resident on other streams. Every reduction runs in a fixed order; atomics act on
 
 | Item | Requirement |
 |---|---|
-| GPU | `sm_100a`, `sm_103a` or `sm_107a` (compute capability 10.0, 10.3 or 10.7), both router-weight positions; the 512-expert top-10 group (`router_weight_gradient="direct"`, `shared_expert="scaled"`) and `mxfp8_transposed="requantized"` on `sm_100a` and `sm_103a` only |
+| GPU | `sm_100a`, `sm_103a` or `sm_107a` (compute capability 10.0, 10.3 or 10.7), both router-weight positions and the 512-expert top-10 group (`router_weight_gradient="direct"`, `shared_expert="scaled"`); `mxfp8_transposed="requantized"` on `sm_100a` and `sm_103a` only |
 | CUDA toolkit (`nvcc`, JIT) | 12.8 for `sm_100a`, 12.9 for `sm_103a`, 13.5 for `sm_107a` |
 | `torch` | with `torch.distributed` and symmetric memory (multicast) |
 | Process group | Initialized, its CUDA device current; all ranks in one peer-accessible NVLink domain with multicast |
@@ -58,10 +59,10 @@ resident on other streams. Every reduction runs in a fixed order; atomics act on
 
 ## Builds
 
-`build.json` lists 285 builds of 108 kernels: 71 kernels for each of `sm_100a`, `sm_103a` and `sm_107a` (the
-router-weight-before-down fused kernels, the top-k 6 epilogue, the scheduler kernels of the 384-expert layouts and
-their fused schedule kernels included), two more for `sm_107a` only, and 35 more for `sm_100a` and `sm_103a` only
-(the kernels of the two mode groups and the eight requantized MXFP8 kernels).
+`build.json` lists 312 builds of 108 kernels: 98 kernels for each of `sm_100a`, `sm_103a` and `sm_107a` (the
+router-weight-before-down fused kernels, the top-k 6 epilogue, the scheduler kernels of the 384-expert layouts, their
+fused schedule kernels and the kernels of the two mode groups included), two more for `sm_107a` only, and eight more
+for `sm_100a` and `sm_103a` only (the requantized MXFP8 kernels).
 
 | Group | Kernels |
 |---|---|

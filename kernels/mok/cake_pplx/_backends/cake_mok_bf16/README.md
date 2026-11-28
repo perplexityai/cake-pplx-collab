@@ -32,11 +32,12 @@ Shared-expert weight gradients remain source-rank local.
   unscaled `dy`, defined at a zero weight) and the per-token shared-expert
   scale (`"scaled"`: `y = s * S(x) + sum_k w_k E_k(x)` with its gradient
   `d_s`), run by the 512-routed-expert group at EP8 `(8, 64)`, top-k 10, on
-  SM100a and SM103a; SiTU-GLU routed experts (`activation="situ_glu"`,
+  SM100a, SM103a and SM107a; SiTU-GLU routed experts (`activation="situ_glu"`,
   `beta tanh(gate / beta) sigmoid(gate) lb tanh(up / lb)` with per-call
   `situ_beta`, `situ_lb`) without a shared expert (`shared_expert="none"`), run
   with the direct router-weight gradient by the 896-routed-expert group at EP64
-  `(64, 14)`, top-k 16, on SM100a and SM103a (see Contract, "Explicit modes").
+  `(64, 14)`, top-k 16, on SM100a, SM103a and SM107a (see Contract, "Explicit
+  modes").
 
 The implementation uses standalone generated CUDA sources, loaded prebuilt
 from `aot/` when the package ships them and otherwise built by the package's
@@ -340,7 +341,7 @@ see "Unequal source inputs") are generated for the same targets, each with
 its own launch binding.
 
 The 512-expert top-10 group's kernels (`MODE_GROUPS["scaled_top10"]`) are
-generated for SM100a and SM103a only: the direct-gradient backward
+generated for SM100a, SM103a and SM107a: the direct-gradient backward
 `backward_fp32_direct` (the arguments of `backward_fp32` and `dy_scaled_ptr`,
 the second per-call `[macro_size, hidden]` BF16 ring that holds the scaled
 `dy` rows the down-projection weight gradient reads), the scaled top-10
@@ -351,7 +352,7 @@ rows kernels of `(8, 64)`. The adapter refuses the group on any other target
 before it loads a kernel.
 
 The 896-expert top-16 group's kernels (`MODE_GROUPS["situ_top16"]`) are
-generated for SM100a and SM103a only: the SiTU-GLU forward, context-free
+generated for SM100a, SM103a and SM107a: the SiTU-GLU forward, context-free
 forward and recompute without a shared expert (`forward_situ_noshared`,
 `forward_noctx_situ_noshared`, `recompute_situ_noshared`: the arguments of
 their SwiGLU roles without the shared maps and `local_tokens`, with the FP32
@@ -554,8 +555,8 @@ across communication-SM splits and under CUDA Graph replay.
 
   | Group | Layouts (EP, local experts) | Top-k | Position | Activation | Weight gradients | `router_weight_gradient` | `shared_expert` | Routed weights | Targets |
   | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-  | `"scaled_top10"` | `(8, 64)` (512 routed experts) | 10 | `"after_down"` | plain SwiGLU | FP32 | `"direct"` | `"scaled"` | BF16 | SM100a, SM103a |
-  | `"situ_top16"` | `(64, 14)` (896 routed experts) | 16 | `"after_down"` | SiTU-GLU | FP32 | `"direct"` | `"none"` | BF16 | SM100a, SM103a |
+  | `"scaled_top10"` | `(8, 64)` (512 routed experts) | 10 | `"after_down"` | plain SwiGLU | FP32 | `"direct"` | `"scaled"` | BF16 | SM100a, SM103a, SM107a |
+  | `"situ_top16"` | `(64, 14)` (896 routed experts) | 16 | `"after_down"` | SiTU-GLU | FP32 | `"direct"` | `"none"` | BF16 | SM100a, SM103a, SM107a |
 
   Recompute (`recompute_forward_context`) is unchanged by the router-weight
   gradient and the shared-expert scale; the SiTU-GLU group recomputes its
@@ -1204,8 +1205,9 @@ SM103a or SM107a device):
 - The 896-expert top-16 group (SiTU-GLU, `shared_expert="none"`): in
   `test_mok_bf16.py` the registry records and the launchers' arguments, the
   refused configurations and calls before device work, the capacity bound at
-  `(64, 14)` (no GPU), and on SM100a and SM103a the top-16 epilogues without a
-  shared row (the exact backward sum, the top-8 bytes on padded slots, CUDA
+  `(64, 14)` (no GPU), and on SM100a, SM103a and SM107a the top-16 epilogues
+  without a shared row (the exact backward sum, the top-8 bytes on padded
+  slots, CUDA
   Graph replay), the scheduler at the bound under the two-rank skew (14 routes
   of every token on one rank, 2 on the next, distinct experts), and the
   adapter's step at `(64, 14)` emulated on one GPU with every route on rank 0
