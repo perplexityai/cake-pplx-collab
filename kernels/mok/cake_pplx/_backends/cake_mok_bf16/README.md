@@ -991,7 +991,8 @@ across communication-SM splits and under CUDA Graph replay.
   the backward launch; at 1.75x / 32,768 the software power cap is active for a
   larger share of that backward's samples with this package. The mechanism is
   not separately confirmed. The checkpointed step, which includes that backward,
-  is faster on every row.
+  is faster on every row. This row is kept by an explicit owner decision with
+  these four backward rows slower; the B200 and GB200 rows have no slower row.
 
   | routing | tokens per rank | forward main (ms) | this package (ms) | change | backward main (ms) | this package (ms) | change | backward after 0.5 s idle main (ms) | this package (ms) | change | checkpointed step main (ms) | this package (ms) | change |
   | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |

@@ -179,6 +179,9 @@ _FACTORY_COMM_SMS = (40, 40)
 # previous split beyond the noise band of the identical processes and at least
 # one row is faster; the lowest geometric mean of the checkpointed-step ratios
 # wins (a tie within the noise band goes to the lower forward geometric mean).
+# The B300 56 / 40 row for H 4096 / I 1024 / top-k 10 is the one exception:
+# it is kept by an explicit owner decision with four of its rows, all of the
+# backward right after a forward, slower.
 # - B200 ((10, 0), 148 SMs) BF16 EP8 20 / 40 for H 5120 / I 2304 / top-k 6
 #   (the 384-expert layout (8, 48), router weight before the down
 #   projection), from forward counts 12, 14, 16 and 20 with backward 40:
