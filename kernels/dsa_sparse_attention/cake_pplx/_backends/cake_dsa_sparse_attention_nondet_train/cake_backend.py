@@ -465,21 +465,21 @@ _R1_RULE: dict[str, int] = dict.fromkeys(KEY_PASS_RULE_FIELDS, 0)
 # A head-window backward above 64 heads (``head_windows``: :func:`head_window_key_passes_rule`) plans one key pass on
 # every row and architecture; only ``key_passes`` selects the key-range-pass builds there (``bwd_main_pass_hw``,
 # ``bwd_main_pass_natural_hw``).  The record's rules were measured on the 64-head program.  Applied to head windows
-# they plan two to four passes on the one-chunk rows (one segment, top-k 2048, T up to 4,224: two / three / four passes
-# from 65,536 / 131,072 / 163,840 keys on sm_100a and sm_103a, two from 131,072 keys on sm_107a; the rows above 2,176
-# tokens ran their passes in two token chunks) and three (sm_103a) or two (sm_107a) passes on the tail rows (which
-# earlier releases already ran in one pass).  One pass was
-# faster than those plans on every multi-pass row timed (96 and 128 heads, both packages; backward, training step and
-# checkpointed recompute; medians of same-round ratios): one-chunk rows on B200 (T = 2,048, S = 131,072; three passes)
-# 6-17 %, on GB300 (T = 2,048 with S = 65,536 / 131,072 and T = 1,024 with S = 163,840; two / three / four passes)
-# 5-22 % and on VR200 (T = 1,024 to 2,176 with S = 131,072 to 1,048,320; two passes) 5-11 %; tail rows on GB300
-# (T = 16,380 with S = 147,420 to 1,048,320, T = 8,448 and 4,352 with S = 131,072; three passes) 15-20 % on the
-# backward and on VR200 (T = 16,380, S = 524,160 / 1,048,320; two passes) 10-12 % on the main-stage kernels.  The
-# forward is unchanged.  [est] With head windows every pass repeats the compaction, the FP32 dQ-partial round trip of
-# both windows and the pipeline fill, which costs more than the L2 locality of a pass's dK/dV accumulator slice gains.
-# One pass also needs no pass scratch.  The single-pass plan runs ``bwd_main_hw`` / ``bwd_main_natural_hw``, so ``dq``
-# takes the one-pass FP32 summation order (the naive BF16 tier judges it).  The 64-head plans, the two-window bridge,
-# the NoPE program and multi-segment rows keep the record's rule.
+# they plan two to four passes on the one-chunk rows (one segment, top-k 2048, T up to 4,224; the rows above 2,176
+# tokens ran their passes in two token chunks): on sm_100a and sm_103a the formula's two to four passes from 45,512 to
+# 182,044 keys (two / three / four at 65,536 / 131,072 / 163,840 keys), on sm_107a two from 131,072 keys.  They also
+# plan three (sm_103a) or two (sm_107a) passes on the tail rows, which earlier releases already ran in one pass.  One
+# pass was faster than those plans on every multi-pass row timed (96 and 128 heads; medians of same-round ratios).
+# One-chunk rows (both packages; backward, training step and checkpointed recompute): B200 (T = 2,048, S = 131,072;
+# three passes) 6-17 %, GB300 (T = 2,048 with S = 65,536 / 131,072 and T = 1,024 with S = 163,840; two / three /
+# four passes) 5-22 %, VR200 (T = 1,024 to 2,176 with S = 131,072 to 1,048,320; two passes) 5-11 %.  Tail rows (this
+# package only): GB300 (T = 16,380 with S = 147,420 to 1,048,320, T = 8,448 and 4,352 with S = 131,072; three passes)
+# 15-20 % on the backward, VR200 (T = 16,380, S = 524,160 / 1,048,320; two passes) 10-12 % on the main-stage kernels.
+# The forward is unchanged.  [est] With head windows every pass repeats the compaction, the FP32 dQ-partial round
+# trip of both windows and the pipeline fill, which costs more than the L2 locality of a pass's dK/dV accumulator
+# slice gains.  One pass also needs no pass scratch.  The single-pass plan runs ``bwd_main_hw`` /
+# ``bwd_main_natural_hw``, so ``dq`` takes the one-pass FP32 summation order (the naive BF16 tier judges it).  The
+# 64-head plans, the two-window bridge, the NoPE program and multi-segment rows keep the record's rule.
 
 
 @dataclass(frozen=True)

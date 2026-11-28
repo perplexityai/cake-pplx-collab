@@ -414,15 +414,16 @@ dQ partial blocks.  From 0.13.1 the policy plans one key pass above 64 heads on
 every row (`plan_key_passes` with `items_per_token = HEAD_WINDOW_ITEMS`);
 `key_passes` still selects the pass build `bwd_main_pass_hw`.  Before, the
 record's rule planned two to four passes on the rows of one 2,176-token chunk
-(two dQ partial blocks per token; top-k 2048) from 65,536 keys on `sm_100a` /
-`sm_103a` and from 131,072 keys on `sm_107a`.  One pass was faster on every
-such row timed (96 and 128 heads; backward, training step and checkpointed
-recompute; medians of same-round ratios): B200 (`T = 2,048`, `S = 131,072`,
-three passes) 6-12 %, GB300 (`T = 2,048` with `S = 65,536` / `131,072`,
-`T = 1,024` with `S = 163,840`; two / three / four passes) 5-19 %, VR200
-(`T = 1,024` to `2,176` with `S = 131,072` to `1,048,320`, two passes)
-5-10 %; it also needs no pass scratch.  dQ takes the one-pass FP32 summation
-order there; dK / dV keep their bits.
+(two dQ partial blocks per token; top-k 2048): on `sm_100a` / `sm_103a` the
+formula's two to four passes from 45,512 to 182,044 keys (two / three / four
+at 65,536 / 131,072 / 163,840 keys), on `sm_107a` two from 131,072 keys.
+One pass was faster on every such row timed (96 and 128 heads; backward,
+training step and checkpointed recompute; medians of same-round ratios): B200
+(`T = 2,048`, `S = 131,072`, three passes) 6-12 %, GB300 (`T = 2,048` with
+`S = 65,536` / `131,072`, `T = 1,024` with `S = 163,840`; two / three / four
+passes) 5-19 %, VR200 (`T = 1,024` to `2,176` with `S = 131,072` to
+`1,048,320`, two passes) 5-10 %; it also needs no pass scratch.  dQ takes the
+one-pass FP32 summation order there; dK / dV keep their bits.
 `cake_backend.dsa_train_workspace_size(..., num_heads=H)` sizes a prepared
 runner.
 

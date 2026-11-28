@@ -738,25 +738,27 @@ skipped by every store.
   `head_window_key_passes_rule` says where this holds: above 64 heads where
   the single-pass head-window main build ships.  The record's rule was
   measured on the 64-head program; with head windows it planned two to four
-  passes on the one-chunk rows (one segment, top-k 2048, `T <= 4,224`: two /
-  three / four passes from 65,536 / 131,072 / 163,840 keys on `sm_100a` and
-  `sm_103a`, two from 131,072 keys on `sm_107a`) and three (`sm_103a`) or two
+  passes on the one-chunk rows (one segment, top-k 2048, `T <= 4,224`): on
+  `sm_100a` and `sm_103a` the formula's two to four passes from 45,512 to
+  182,044 keys (two / three / four at 65,536 / 131,072 / 163,840 keys), on
+  `sm_107a` two from 131,072 keys.  It also planned three (`sm_103a`) or two
   (`sm_107a`) passes on the tail rows, which earlier releases already ran in
-  one pass.  One pass was faster on every multi-pass row timed (96 and 128 heads,
-  both packages, backward, training step and checkpointed recompute; medians
-  of same-round ratios): one-chunk rows on B200 (`T = 2,048`, `S = 131,072`,
-  three passes) 6-17 %, on GB300 (`T = 2,048` with `S = 65,536` / `131,072`,
-  `T = 1,024` with `S = 163,840`; two / three / four passes) 5-22 %, on VR200
-  (`T = 1,024` to `2,176` with `S = 131,072` to `1,048,320`, two passes)
-  5-11 %; tail rows on GB300 (`T = 16,380` with `S = 147,420` to `1,048,320`,
-  `T = 8,448` and `4,352` with `S = 131,072`; three passes) 15-20 % on the
-  backward, on VR200 (`T = 16,380`, `S = 524,160` / `1,048,320`, two passes)
-  10-12 % on the main-stage kernels.  The forward is unchanged.  [est] Every
-  pass repeats the compaction, the FP32 dQ-partial round trip of both
-  windows and the pipeline fill, which costs more than the L2 locality of a
-  pass's dK/dV accumulator slice gains.  One pass needs no pass scratch.  A
-  packed multi-segment row plans one pass as before.  The two-window bridge
-  and the 64-head plans keep the record's rule.
+  one pass.  One pass was faster on every multi-pass row timed (96 and 128
+  heads; medians of same-round ratios).  One-chunk rows (both packages;
+  backward, training step and checkpointed recompute): B200 (`T = 2,048`,
+  `S = 131,072`, three passes) 6-17 %, GB300 (`T = 2,048` with `S = 65,536` /
+  `131,072`, `T = 1,024` with `S = 163,840`; two / three / four passes)
+  5-22 %, VR200 (`T = 1,024` to `2,176` with `S = 131,072` to `1,048,320`,
+  two passes) 5-11 %.  Tail rows (this package only): GB300 (`T = 16,380`
+  with `S = 147,420` to `1,048,320`, `T = 8,448` and `4,352` with
+  `S = 131,072`; three passes) 15-20 % on the backward, VR200 (`T = 16,380`,
+  `S = 524,160` / `1,048,320`, two passes) 10-12 % on the main-stage
+  kernels.  The forward is unchanged.  [est] Every pass repeats the
+  compaction, the FP32 dQ-partial round trip of both windows and the
+  pipeline fill, which costs more than the L2 locality of a pass's dK/dV
+  accumulator slice gains.  One pass needs no pass scratch.  A packed
+  multi-segment row plans one pass as before.  The two-window bridge and the
+  64-head plans keep the record's rule.
 * Key-pass chunks.  With `key_passes > 1` each item has its own FP32
   `dq_partial` row (147,456 B), so the token chunk is planned at two items
   per token: the largest multiple of 128 tokens whose
