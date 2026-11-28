@@ -71,7 +71,7 @@ Five kinds of program:
 | `fwd_h4096_t32` | 32 threads | 1 row | the forward at `H = 4096` below the band of `fwd_h4096_flat` (SM107: at every row count) |
 | `fwd_h4096_flat`, `fwd_h3584_flat` | 128 threads, two loads of 8 elements a thread | 2048 consecutive elements | the forward in its band of `cake_jit.ROUTES` (many rows; SM100 and SM103) |
 | `bwd_h4096`, `bwd_h3584` | 4 warps (128 threads) | 1 row | the backward outside the bands of the one-warp programs, on a grid of at most 8 CTAs per SM while a call's rows fit in L2 |
-| `bwd_h4096_warp`, `bwd_h3584_warp` | 128 threads, one warp a row | 4 consecutive rows | the backward in its band: `bwd_h3584_warp` in one band on SM100 and SM103, both from a few thousand rows on SM107 |
+| `bwd_h4096_warp`, `bwd_h3584_warp` | 128 threads, one warp a row | 4 consecutive rows | the backward in its bands: `bwd_h3584_warp` in one band on SM100 and SM103; on SM107 both from 3328 rows to one whole wave of their CTAs, and again for many rows |
 
 `cake_jit.route(stage, H, rows, arch)` picks the record and the grid cap from
 the route table of the device's architecture, `cake_jit.routes(arch)`:

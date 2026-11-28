@@ -142,14 +142,25 @@ ROUTES: dict[str, tuple[tuple[int, str, int], ...]] = {
 }
 # The route tables of the architectures that take other bands than ``ROUTES`` (:func:`routes`), each with every key of
 # ``ROUTES``.  Measured on VR200 (SM107): the forward of one warp (H = 3584) or one CTA of 32 threads (H = 4096) a row
-# is faster than the flat forward at every row count, and the backward of one warp a row is faster than the four-warp
-# backward from the first row of its band; below it the four-warp backward on 8 CTAs per SM is the faster.
+# is faster than the flat forward at every row count.  The backward of one warp a row is faster than the four-warp
+# backward from 3328 rows, except just past one whole wave of its CTAs (few fit on an SM, so the next wave starts
+# nearly empty): there, up to the first row of its next band, the four-warp backward on the full grid is the faster.
 ARCH_ROUTES: dict[str, dict[str, tuple[tuple[int, str, int], ...]]] = {
     "sm_107a": {
         "fwd_h4096": ((1, "fwd_h4096_t32", 0),),
         "fwd_h3584": ((1, "fwd_h3584", 0),),
-        "bwd_h4096": ((1, "bwd_h4096", 8), (3584, "bwd_h4096_warp", 0)),
-        "bwd_h3584": ((1, "bwd_h3584", 8), (3072, "bwd_h3584_warp", 0)),
+        "bwd_h4096": (
+            (1, "bwd_h4096", 8),
+            (3328, "bwd_h4096_warp", 0),
+            (5089, "bwd_h4096", 0),
+            (24576, "bwd_h4096_warp", 0),
+        ),
+        "bwd_h3584": (
+            (1, "bwd_h3584", 8),
+            (3328, "bwd_h3584_warp", 0),
+            (5937, "bwd_h3584", 0),
+            (8192, "bwd_h3584_warp", 0),
+        ),
     },
 }
 
