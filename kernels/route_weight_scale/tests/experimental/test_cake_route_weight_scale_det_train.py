@@ -18,13 +18,14 @@ Backend suite of the Cake deterministic route-weight row scaling training packag
 ``cake_pplx.cake_route_weight_scale_det_train``): ``y = bf16(w x)``, ``dx = bf16(w dy)`` and the FP32
 ``dw = sum over c of dy x``, ``H`` 4096 and 3584, on SM100, SM103 and SM107.
 
-Without a device: the registry (eight records, ``<stage>_h<width>``, ``fwd_h4096_t32``, ``fwd_h4096_flat``,
-``fwd_h3584_flat`` and ``bwd_h3584_warp``, each delivered for the three architectures, its launch facts, its rows (or
-elements) per CTA and its argument plan in the order the host passes it; literal tables the exporter reads), the route
-table (bands of row counts from 1 in increasing order, each naming a record of its stage and width and a grid cap) and
-the record and cap of each call, the launch grid (``nblocks = ceil(rows / rows_per_cta)`` CTAs, or ``ceil(rows * H /
-elements_per_cta)`` for a flat record, at most ``2**31 - nblocks``, and with a cap at most that many CTAs per SM), the
-refusal of a record that takes its parameters in another order, the capability map, the operand checks
+Without a device: the registry (nine records, ``<stage>_h<width>``, ``fwd_h4096_t32``, ``fwd_h4096_flat``,
+``fwd_h3584_flat``, ``bwd_h4096_warp`` and ``bwd_h3584_warp``, each delivered for the three architectures, its launch
+facts, its rows (or elements) per CTA and its argument plan in the order the host passes it; literal tables the
+exporter reads), the route table of each architecture (bands of row counts from 1 in increasing order, each naming a
+record of its stage and width and a grid cap) and the record and cap of each call, the launch grid (``nblocks =
+ceil(rows / rows_per_cta)`` CTAs, or ``ceil(rows * H / elements_per_cta)`` for a flat record, at most ``2**31 -
+nblocks``, and with a cap at most that many CTAs per SM), the refusal of a record that takes its parameters in another
+order, the capability map, the operand checks
 (dtype, shape, width, strides, alignment, ``w`` and ``dw`` layout, CPU tensors), the build manifest (every record's
 library, the recorded source digests) and no environment read outside the JIT shim.
 
@@ -42,9 +43,12 @@ On SM100 / SM103 / SM107, the contract of issue #259, each without a tolerance w
 * Row slices of wider and longer buffers as inputs and outputs, read and written in place (the bytes around them
   untouched); operands of another layout refused before any allocation or launch.
 * Run-to-run bits: repeated calls, a side stream, a CUDA graph replay, another current device.
+* Every record, launched directly on its full grid, gives the contract's bits, whether or not the device's route
+  table takes it.
 * One library per record and architecture serves every row count (no library loaded after the first call of each
-  record); on both sides of every band boundary of the route table, and inside every band with a grid cap, each stage
-  gives the bits of its ``<stage>_h<width>`` record launched directly on the full grid, and the contract's bits;
+  record); on both sides of every band boundary of the device's route table, and inside every band with a grid cap,
+  each stage gives the bits of its ``<stage>_h<width>`` record launched directly on the full grid, and the contract's
+  bits;
   no host synchronization (``torch.cuda.set_sync_debug_mode("error")``), the autograd function saves only
   ``x`` and ``w`` and gives the steps' bits, ``torch.utils.checkpoint(..., use_reentrant=False)`` gives the plain
   call's gradients bit for bit, an expanded upstream gradient is read, no double backward.
@@ -101,6 +105,7 @@ RECORDS = (
     "fwd_h3584_flat",
     "bwd_h4096",
     "bwd_h3584",
+    "bwd_h4096_warp",
     "bwd_h3584_warp",
 )
 PARAMETERS = {
@@ -119,13 +124,17 @@ ROWS_PER_CTA = {
     "fwd_h3584": 4,
     "bwd_h4096": 1,
     "bwd_h3584": 1,
+    "bwd_h4096_warp": 4,
     "bwd_h3584_warp": 4,
 }
 # Row counts of the bit tests: 1 to 8 (one partial block of 4 rows and two), odd counts, and counts past a block.
 ROW_COUNTS = (1, 2, 3, 4, 5, 7, 8, 129, 1000, 4097, 65537)
-# The first row of every band of the route table, over all stages and widths: calls at these row counts take every
-# band, so every routed record (no band takes fwd_h4096; the full-grid checks launch it).
-BAND_FIRST_ROWS = tuple(sorted({first for bands in cake_jit.ROUTES.values() for first, _, _ in bands}))
+# The first row of every band of the route tables, over all architectures, stages and widths: calls at these row
+# counts take every band of the device's table, so every record it routes (no band takes fwd_h4096; the full-grid
+# checks launch it).
+BAND_FIRST_ROWS = tuple(
+    sorted({first for arch in ARCHES for bands in cake_jit.routes(arch).values() for first, _, _ in bands})
+)
 # The issue's largest row count: at H 4096 more than 2^31 elements.
 MAX_ISSUE_ROWS = 1_048_576
 # Free device memory the 1,048,576-row test needs: x, dy and dx (24 GiB) and the references of one chunk.
@@ -196,11 +205,11 @@ def _band_rows(bands) -> set[int]:
     return rows
 
 
-def _full_grid(stage: str, x, dy, w) -> dict[str, torch.Tensor]:
-    """The outputs of record ``<stage>_h<width>`` launched directly through its FFI entry on its full grid
-    (``cake_jit.grid`` without a cap: one CTA per block of rows), with the arguments ``_launch`` passes."""
+def _full_grid(stage: str, x, dy, w, name: str = "") -> dict[str, torch.Tensor]:
+    """The outputs of record ``name`` (default ``<stage>_h<width>``) launched directly through its FFI entry on its full
+    grid (``cake_jit.grid`` without a cap: one CTA per block), with the arguments ``_launch`` passes."""
     rows, width = x.shape
-    name = f"{stage}_h{width}"
+    name = name or f"{stage}_h{width}"
     entry = pkg._entry(name, pkg.device_arch(x.device.index))
     many = rows > 1
     if stage == "fwd":
@@ -261,38 +270,54 @@ def test_registry_records_are_well_formed() -> None:
 
 @pytestmark_cpu
 def test_routes_cover_every_stage_and_width_in_bands() -> None:
-    """``ROUTES`` has one route per ``<stage>_h<width>``: bands from row 1 in strictly increasing order, each naming a
-    record of that stage and width and a grid cap (0, or CTAs per SM for a record of one row a CTA).  ``route`` takes
-    the last band whose first row is at most the row count: checked one row below, at and one row above the first row
-    of every band."""
-    assert sorted(cake_jit.ROUTES) == sorted(f"{stage}_h{width}" for stage in STAGES for width in WIDTHS)
-    for stage in STAGES:
-        for width in WIDTHS:
-            key = f"{stage}_h{width}"
-            bands = cake_jit.ROUTES[key]
-            firsts = [first for first, _, _ in bands]
-            assert firsts[0] == 1, key
-            assert all(a < b for a, b in zip(firsts, firsts[1:])), key
-            for first, name, cap in bands:
-                assert isinstance(first, int) and first < cake_jit.MAX_ROWS, (key, first)
-                assert name in cake_jit.MODULES, (key, name)
-                record = cake_jit.MODULES[name]
-                assert (record["stage"], record["width"]) == (stage, width), (key, name)
-                assert isinstance(cap, int) and not isinstance(cap, bool) and cap >= 0, (key, cap)
-                assert cap == 0 or record.get("rows_per_cta") == 1, (key, name, cap)
-            for index, (first, name, cap) in enumerate(bands):
-                if first > 1:
-                    assert cake_jit.route(stage, width, first - 1) == bands[index - 1][1:], (key, first - 1)
-                assert cake_jit.route(stage, width, first) == (name, cap), (key, first)
-                above = bands[index + 1] if index + 1 < len(bands) and bands[index + 1][0] == first + 1 else None
-                assert cake_jit.route(stage, width, first + 1) == (above or bands[index])[1:], (key, first + 1)
-            assert cake_jit.route(stage, width, cake_jit.MAX_ROWS - 1) == bands[-1][1:], key
+    """Each architecture's route table (``routes``: its ``ARCH_ROUTES`` table, else ``ROUTES``) has one route per
+    ``<stage>_h<width>``: bands from row 1 in strictly increasing order, each naming a record of that stage and width
+    and a grid cap (0, or CTAs per SM for a record of one row a CTA).  ``route`` takes the last band of the
+    architecture's table whose first row is at most the row count: checked one row below, at and one row above the
+    first row of every band.  Every record but ``fwd_h4096`` is taken by a band of some table."""
+    keys = sorted(f"{stage}_h{width}" for stage in STAGES for width in WIDTHS)
+    assert set(cake_jit.ARCH_ROUTES) <= set(ARCHES)
+    assert cake_jit.routes("sm_100a") is cake_jit.ROUTES and cake_jit.routes("sm_103a") is cake_jit.ROUTES
+    assert cake_jit.routes("sm_107a") is cake_jit.ARCH_ROUTES["sm_107a"]
+    routed = set()
+    for arch in ARCHES:
+        table = cake_jit.routes(arch)
+        assert sorted(table) == keys, arch
+        for stage in STAGES:
+            for width in WIDTHS:
+                key = f"{stage}_h{width}"
+                bands = table[key]
+                firsts = [first for first, _, _ in bands]
+                assert firsts[0] == 1, (arch, key)
+                assert all(a < b for a, b in zip(firsts, firsts[1:])), (arch, key)
+                for first, name, cap in bands:
+                    assert isinstance(first, int) and first < cake_jit.MAX_ROWS, (arch, key, first)
+                    assert name in cake_jit.MODULES, (arch, key, name)
+                    record = cake_jit.MODULES[name]
+                    assert (record["stage"], record["width"]) == (stage, width), (arch, key, name)
+                    assert arch in record["arches"], (arch, key, name)
+                    assert isinstance(cap, int) and not isinstance(cap, bool) and cap >= 0, (arch, key, cap)
+                    assert cap == 0 or record.get("rows_per_cta") == 1, (arch, key, name, cap)
+                    routed.add(name)
+                for index, (first, name, cap) in enumerate(bands):
+                    if first > 1:
+                        below = cake_jit.route(stage, width, first - 1, arch)
+                        assert below == bands[index - 1][1:], (arch, key, first - 1)
+                    assert cake_jit.route(stage, width, first, arch) == (name, cap), (arch, key, first)
+                    above = bands[index + 1] if index + 1 < len(bands) and bands[index + 1][0] == first + 1 else None
+                    assert cake_jit.route(stage, width, first + 1, arch) == (above or bands[index])[1:], (arch, key)
+                assert cake_jit.route(stage, width, cake_jit.MAX_ROWS - 1, arch) == bands[-1][1:], (arch, key)
+    assert routed == set(RECORDS) - {"fwd_h4096"}
     with pytest.raises(KeyError):
-        cake_jit.route("fwd", 2048, 1)
+        cake_jit.route("fwd", 2048, 1, "sm_100a")
     with pytest.raises(KeyError):
-        cake_jit.route("bwd_unweighted", 4096, 1)
+        cake_jit.route("bwd_unweighted", 4096, 1, "sm_100a")
+    with pytest.raises(KeyError):
+        cake_jit.route("fwd", 4096, 1, "sm_90a")
+    with pytest.raises(KeyError):
+        cake_jit.routes("sm_120a")
     with pytest.raises(ValueError):
-        cake_jit.route("fwd", 4096, 0)
+        cake_jit.route("fwd", 4096, 0, "sm_100a")
 
 
 @pytestmark_cpu
@@ -313,10 +338,11 @@ def test_registry_is_a_literal_table() -> None:
                 literals[target.id] = ast.literal_eval(node.value)
             except ValueError:
                 continue
-    for name in ("MODULES", "ROUTES", "STAGES", "WIDTHS", "ARCHES", "PACKAGE", "LIBRARY_PREFIX"):
+    for name in ("MODULES", "ROUTES", "ARCH_ROUTES", "STAGES", "WIDTHS", "ARCHES", "PACKAGE", "LIBRARY_PREFIX"):
         assert name in literals, name
     assert literals["MODULES"] == cake_jit.MODULES
     assert literals["ROUTES"] == cake_jit.ROUTES
+    assert literals["ARCH_ROUTES"] == cake_jit.ARCH_ROUTES
 
 
 @pytestmark_cpu
@@ -783,11 +809,12 @@ def test_an_unsupported_device_is_refused_before_any_allocation(device, monkeypa
 def test_one_library_per_record_serves_every_row_count(device, monkeypatch) -> None:
     """After the first call of each record, no call at another row count loads or builds a library, and each row's
     outputs do not depend on the other rows (the first rows of a longer call give the same bits).  The row counts
-    include one below, at and one above every band boundary of ``ROUTES``, where a stage changes programs or grid
-    caps, and one row count inside every band with a cap (:func:`_band_rows`): there each stage gives the bits of its
-    ``<stage>_h<width>`` record launched directly on the full grid over the same rows, and the contract's bits."""
+    include one below, at and one above every band boundary of the device's route table, where a stage changes programs
+    or grid caps, and one row count inside every band with a cap (:func:`_band_rows`): there each stage gives the bits
+    of its ``<stage>_h<width>`` record launched directly on the full grid over the same rows, and the contract's
+    bits."""
     for width in WIDTHS:
-        for rows in (4, *BAND_FIRST_ROWS):  # every band of every route, so every routed record
+        for rows in (4, *BAND_FIRST_ROWS):  # every band of the device's routes, so every record they take
             x, dy, w = make_inputs(rows, width, seed=15, device=device)
             _step(x, dy, w)
     arch = pkg.device_arch(device.index)
@@ -801,7 +828,7 @@ def test_one_library_per_record_serves_every_row_count(device, monkeypatch) -> N
 
     monkeypatch.setattr(cake_build, "load_library", refuse)
     for width in WIDTHS:
-        checked = {stage: _band_rows(cake_jit.ROUTES[f"{stage}_h{width}"]) for stage in STAGES}
+        checked = {stage: _band_rows(cake_jit.routes(arch)[f"{stage}_h{width}"]) for stage in STAGES}
         counts = sorted({*ROW_COUNTS, *checked["fwd"], *checked["bwd"]})
         x, dy, w = make_inputs(max(counts), width, seed=16, device=device, weight="signed")
         full = _step(x, dy, w)
@@ -820,6 +847,22 @@ def test_one_library_per_record_serves_every_row_count(device, monkeypatch) -> N
                 assert same_bits(part["dx"], scaled(wr, dyr)), (width, rows)
                 assert same_bits(part["dw"], tree_row_sum(xr, dyr)), (width, rows)
     assert pkg.load.cache_info().currsize == loaded
+
+
+@pytest.mark.parametrize("name", RECORDS)
+def test_every_record_gives_the_contract_bits_on_its_full_grid(name, device) -> None:
+    """Each record, launched directly through its FFI entry on its full grid, stores the contract's bits at one row, a
+    partial block and a count past several blocks, whether or not the device's route table takes it."""
+    record = cake_jit.MODULES[name]
+    stage, width = record["stage"], record["width"]
+    for rows in (1, 5, 4097):
+        x, dy, w = make_inputs(rows, width, seed=19, device=device, weight="signed")
+        found = _full_grid(stage, x, dy, w, name)
+        if stage == "fwd":
+            assert same_bits(found["y"], scaled(w, x)), (name, rows)
+        else:
+            assert same_bits(found["dx"], scaled(w, dy)), (name, rows)
+            assert same_bits(found["dw"], tree_row_sum(x, dy)), (name, rows)
 
 
 @pytest.mark.parametrize("width", WIDTHS)
