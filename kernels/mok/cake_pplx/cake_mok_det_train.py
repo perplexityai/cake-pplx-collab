@@ -156,8 +156,8 @@ def prepare_mok_bf16(
     routed weights, and 896 routed experts at EP64 ((64, 14)) with top-k 16,
     which runs only with ``"after_down"``, ``activation="situ_glu"``,
     ``fp32_wgrad=True``, ``router_weight_gradient="direct"``,
-    ``shared_expert="none"`` and BF16 routed weights; both on sm_100a and
-    sm_103a (:data:`MODE_GROUPS`). The ``"direct"``, ``"scaled"``,
+    ``shared_expert="none"`` and BF16 routed weights; both on sm_100a,
+    sm_103a and sm_107a (:data:`MODE_GROUPS`). The ``"direct"``, ``"scaled"``,
     ``"none"`` and ``"situ_glu"`` modes run with those configurations only.
     Any other combination raises before any kernel is loaded or launched:
     ``TypeError`` for a position, router-weight gradient, shared-expert mode

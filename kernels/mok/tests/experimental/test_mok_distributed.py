@@ -26,8 +26,8 @@ SM107a: at EP1 and the diagnostic EP4 layout, and on the requester's inputs at t
 (8, 48) with top-6 over changing source counts, chosen placements, a full skew at the requester's no-overflow
 multiplier, the trap of a schedule past its capacity, the bytes of separate group launches and the bytes of the
 forward source split; and the 512-expert top-10 group of the explicit modes (``router_weight_gradient="direct"``,
-``shared_expert="scaled"``) at EP8 ``(8, 64)`` over changing source counts on SM100a and SM103a (inputs drawn on the
-CPU).
+``shared_expert="scaled"``) at EP8 ``(8, 64)`` over changing source counts on SM100a, SM103a and SM107a (inputs drawn on
+the CPU).
 Each worker checks the contract and repeatability in every rank; the accuracy verdicts of each case (the whole
 group's outputs against the float64 oracle beside the naive BF16 implementation) are recorded here and
 printed as ``TIER`` lines.  The known accuracy gaps (:mod:`tests.experimental._mok_gaps`) are judged in items of their
@@ -305,7 +305,7 @@ def test_before_down_source_split_bitwise(record_property, world, local_experts)
 
 def _require_scaled_group(world):
     """Skip before any process starts unless every rank's device has the 512-expert top-10 group's builds
-    (``MODE_GROUPS["scaled_top10"].targets``: SM100a and SM103a) and they are in this package's registry
+    (``MODE_GROUPS["scaled_top10"].targets``: SM100a, SM103a and SM107a) and they are in this package's registry
     (``test_mok_bf16.py`` fails while they are not)."""
     group = kernels.MODE_GROUPS["scaled_top10"]
     registry = cake_package("cake_mok_bf16", "jit")._registry()

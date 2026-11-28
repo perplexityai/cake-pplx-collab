@@ -25,14 +25,14 @@ with another communication-SM split), zero weights, recompute and the context-fr
 384-expert scheduler layouts, and the scheduler and the adapter at the requested worst-case schedule capacity (the
 routed weight gradients from ring rows past 2^31 bytes exactly).
 The explicit modes (``router_weight_gradient``, ``shared_expert``, ``activation``): their refusals before device work
-and their launchers' arguments against the registry (no GPU), and on SM100a and SM103a the 512-expert top-10 group
-(``MODE_GROUPS["scaled_top10"]``) on inputs drawn on the CPU: the shared-scale helpers (``BF16(s * v)`` bit for bit, the
-row dots repeatable at any grid size), the scaled epilogues (the exact backward sum, ``s = 1`` against the top-8
-epilogues), the direct-gradient backward against the quotient one (every shared output and the routed down-projection
-weight gradient bit for bit, zero weights, the shared-scale operands at ``s = 1`` and ``s = 0``), and the adapter at
-EP8 ``(8, 64)`` emulated on one GPU (nine backward items, checkpointed step, CUDA Graph, where ``s`` enters, changing
-source counts without kernel loads, no host synchronization in a steady-state step, ``torch.utils.checkpoint`` with
-``use_reentrant=False``).
+and their launchers' arguments against the registry (no GPU), and on SM100a, SM103a and SM107a the 512-expert top-10
+group (``MODE_GROUPS["scaled_top10"]``) on inputs drawn on the CPU: the shared-scale helpers (``BF16(s * v)`` bit for
+bit, the row dots repeatable at any grid size), the scaled epilogues (the exact backward sum, ``s = 1`` against the
+top-8 epilogues), the direct-gradient backward against the quotient one (every shared output and the routed
+down-projection weight gradient bit for bit, zero weights, the shared-scale operands at ``s = 1`` and ``s = 0``), and
+the adapter at EP8 ``(8, 64)`` emulated on one GPU (nine backward items, checkpointed step, CUDA Graph, where ``s``
+enters, changing source counts without kernel loads, no host synchronization in a steady-state step,
+``torch.utils.checkpoint`` with ``use_reentrant=False``).
 Every kernel output is checked against its contract (finite; exact integer and table outputs; documented bitwise
 route forms such as recompute == saved context and graph replay == eager launch) and for run-to-run repeatability
 (five launches on the same inputs give the same bytes).  The accuracy of every floating output against the float64
@@ -97,8 +97,8 @@ def _same(a, b):
 
 def _require_role(role):
     """Skip a role of :data:`BEFORE_DOWN_ROLES` (the router-weight-before-down kernels, top-k 6 and the 384-expert
-    scheduler layouts: builds for the targets of ``BEFORE_DOWN_TARGETS``) or of :data:`MODE_GROUP_ROLES` (SM100a and
-    SM103a) on a device whose target has no build of it; a group role absent from the registry skips too, and
+    scheduler layouts: builds for the targets of ``BEFORE_DOWN_TARGETS``) or of :data:`MODE_GROUP_ROLES` (SM100a, SM103a
+    and SM107a) on a device whose target has no build of it; a group role absent from the registry skips too, and
     :func:`test_mode_group_roles_are_registry_records` fails for it.  Every other role is built for every target
     (:func:`test_before_down_roles_are_registry_records`), so a missing build fails at load instead of skipping."""
     require_gpu()
@@ -3204,12 +3204,13 @@ def _group_stub_loader(monkeypatch, loaded=None):
 
 
 def test_mode_group_roles_are_registry_records():
-    """Every role of a :data:`MODE_GROUPS` group is a registry record built for exactly the group's targets (SM100a and
-    SM103a), with the arguments the launchers pass: the direct-gradient backward takes those of ``backward_fp32`` and
-    ``dy_scaled_ptr``, the scaled epilogues those of the top-8 epilogues and ``shared_scale``, the SiTU-GLU kernels
-    those of their SwiGLU siblings without the shared maps and ``local_tokens`` and with ``situ_beta``, ``situ_lb`` in
-    the place of ``swiglu_limit``, the top-16 epilogues those of the top-8 ones without the ``shared`` row, the 512-
-    and 896-expert scheduler kernels those of the 256-expert ones, and the two shared-scale helpers their own lists."""
+    """Every role of a :data:`MODE_GROUPS` group is a registry record built for exactly the group's targets (SM100a,
+    SM103a and SM107a), with the arguments the launchers pass: the direct-gradient backward takes those of
+    ``backward_fp32`` and ``dy_scaled_ptr``, the scaled epilogues those of the top-8 epilogues and ``shared_scale``, the
+    SiTU-GLU kernels those of their SwiGLU siblings without the shared maps and ``local_tokens`` and with ``situ_beta``,
+    ``situ_lb`` in the place of ``swiglu_limit``, the top-16 epilogues those of the top-8 ones without the ``shared``
+    row, the 512- and 896-expert scheduler kernels those of the 256-expert ones, and the two shared-scale helpers their
+    own lists."""
     registry = jit._registry()
     missing = [role for role in MODE_GROUP_ROLES if role not in registry]
     assert missing == [], f"group roles not in this package's registry: {missing}"
@@ -3287,11 +3288,10 @@ def test_mode_group_configurations_outside_the_group_are_refused(layout, topk, c
 
 def test_mode_group_configuration_is_checked_before_device_work(monkeypatch):
     """Host only: ``check_configuration`` admits the group's configuration and returns its name, and the default
-    modes keep every existing configuration (returning None); ``check_target`` accepts the group on SM100a and SM103a
-    and refuses it elsewhere with a message naming the two.  On an SM107a device the adapter refuses the group before
-    it loads a kernel; on SM100a and SM103a it loads the group's roles (the direct-gradient backward, the scaled top-10
-    epilogues, the shared-scale helpers, the (8, 64) scheduler kernels) and none of the quotient backward or the
-    unscaled epilogues."""
+    modes keep every existing configuration (returning None); ``check_target`` accepts the group on SM100a, SM103a
+    and SM107a and refuses it elsewhere with a message naming the three.  On each of the three the adapter loads the
+    group's roles (the direct-gradient backward, the scaled top-10 epilogues, the shared-scale helpers, the (8, 64)
+    scheduler kernels) and none of the quotient backward or the unscaled epilogues."""
     group = kernels.MODE_GROUPS["scaled_top10"]
     assert group.targets == ("sm_100a", "sm_103a", "sm_107a")
     assert kernels.check_configuration(8, 64, 10, **GROUP_OK) == "scaled_top10"
@@ -4097,7 +4097,7 @@ def test_memory_report_counts_each_storage_once():
     )
 
 
-# The 512-expert top-10 group (``MODE_GROUPS["scaled_top10"]``) on SM100a and SM103a: the helpers, the scaled
+# The 512-expert top-10 group (``MODE_GROUPS["scaled_top10"]``) on SM100a, SM103a and SM107a: the helpers, the scaled
 # epilogues, the direct-gradient backward and the adapter.  Every input is drawn on the CPU and copied to the device.
 
 #: The group's (EP, local experts) layout and top-k.
