@@ -2684,7 +2684,7 @@ ROW_RULE_MIN_T: dict[tuple, tuple[tuple[int, dict], ...]] = {
 # faster beyond the A/A band in both, the paired median in the comment, with one bit pattern run to run and within the
 # naive BF16 tier on five seeds.  Its batched keys (96-head MLA projections) apply at every head count above one; only
 # 96 heads were measured.  Every other part, token count and row keeps the plan of version 0.3.28.
-# Version 0.3.30 adds 10 exact keys to the 152-SM sm_103a part (GB300) and 1 exact keys to the 148-SM sm_100a part
+# Version 0.3.30 adds 10 exact keys to the 152-SM sm_103a part (GB300) and 1 exact key to the 148-SM sm_100a part
 # (B200): forwards, input gradients and weight gradients (BF16 and FP32 outputs) at T 16380, 32736 and 32768, each named
 # with its measured program in the comment above it; each rule is the full knob set that names that program, as in
 # version 0.3.28.  Each was measured on one part of its SM count against the plan of version 0.3.29 in 21 paired rounds
