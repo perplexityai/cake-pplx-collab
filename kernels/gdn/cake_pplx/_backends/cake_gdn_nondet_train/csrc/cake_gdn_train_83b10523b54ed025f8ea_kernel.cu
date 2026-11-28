@@ -254,6 +254,8 @@ kernel_cake_gdn_train_83b10523b54ed025f8ea(__nv_bfloat16* __restrict__ qn, __nv_
     const int s_dgk_addr = smem + 107264;
     float* s_red = reinterpret_cast<float*>(smem_raw + 107776);
     const int s_red_addr = smem + 107776;
+    __nv_bfloat16* s_lo = reinterpret_cast<__nv_bfloat16*>(smem_raw + 53376);
+    const int s_lo_addr = smem + 53376;
 
     // Mbarrier init (21 barriers at smem_raw[107904..108072))
 
@@ -1217,7 +1219,7 @@ kernel_cake_gdn_train_83b10523b54ed025f8ea(__nv_bfloat16* __restrict__ qn, __nv_
     asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
     asm volatile("tcgen05.fence::before_thread_sync;");
     __syncthreads();
-    unsigned int lo_ss = s_do_addr + (unsigned int)(53376 + n0 / 64 * 20352);
+    unsigned int lo_ss = s_lo_addr + (unsigned int)(n0 / 64 * 20352);
     int lo_sr = rb * 16 + lane_0 / 8;
     asm volatile("cp.async.cg.shared::cta.global [%0], [%1], 16, %2;"
         :: "r"(lo_ss + (unsigned int)(lo_sr * 128 + (lane_0 % 8 ^ lo_sr & 7) * 16)), "l"(dv2_lo + (((long long)(tok0 + lo_sr) * (long long)num_v_heads + (long long)hv) * 128ll + (long long)(n0 + lane_0 % 8 * 8))), "r"((n_valid > lo_sr) ? 16 : 0));
@@ -1647,7 +1649,7 @@ kernel_cake_gdn_train_83b10523b54ed025f8ea(__nv_bfloat16* __restrict__ qn, __nv_
             :: "r"(_mma_a_lo_0), "r"(_mma_a_lo_0), "r"((tmem_acc_cols + (1048768))), "r"(0), "r"(_elected_61) : "memory");
         tcgen05_commit_leader(m7_addr, _elected_61);
     }
-    unsigned int lo_rs = s_do_addr + (unsigned int)(53376 + n0 / 64 * 20352);
+    unsigned int lo_rs = s_lo_addr + (unsigned int)(n0 / 64 * 20352);
     int lo_rr = rb * 16 + lane_0 % 8;
     asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n"
         : "=r"(lo_a[0]), "=r"(lo_a[1]), "=r"(lo_a[2]), "=r"(lo_a[3])
