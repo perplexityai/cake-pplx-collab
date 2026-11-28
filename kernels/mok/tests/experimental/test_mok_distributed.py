@@ -342,3 +342,39 @@ def test_scaled_group_training(record_property):
         for counts in workers.before_down_steps(world)
     ]
     _record(results, record_property)
+
+
+#: The layouts of each MODE_GROUPS group after its first (one GPU: the scheduler of rank 0 alone), by id.
+ADDED_GROUP_LAYOUTS = {
+    f"{name}-ep{ep}-local{experts}": (ep, experts, group.topk)
+    for name, group in kernels.MODE_GROUPS.items()
+    for ep, experts in group.layouts[1:]
+}
+
+
+@pytest.mark.parametrize("ep,local_experts,topk", list(ADDED_GROUP_LAYOUTS.values()), ids=list(ADDED_GROUP_LAYOUTS))
+def test_group_layout_overflow_traps(record_property, ep, local_experts, topk):
+    """The scheduler of a group's later layout as rank 0 on one GPU (the gathered ids given), at the full skew to rank
+    0 with a schedule capacity one 256-row tile below rank 0's padded rows, in a process session of its own: the rows
+    kernel traps and the next CUDA call raises (the text is recorded as ``trap_error``) before the timeout.  Then the
+    same skew at exactly the padded rows passes and schedules every padded row."""
+    registry = cake_package("cake_mok_bf16", "jit")._registry()
+    for role in (f"count_{ep}_{local_experts}", f"rows_{ep}_{local_experts}"):
+        if role not in registry:
+            pytest.skip(f"{role} is not in this package's registry")
+    if torch.cuda.is_available() and torch.cuda.device_count() >= 1:
+        capability = torch.cuda.get_device_capability(0)
+        arch = gaps.TARGETS.get(capability, f"sm_{capability[0]}{capability[1]}")
+        if arch not in registry[f"rows_{ep}_{local_experts}"]["arches"]:
+            pytest.skip(f"rows_{ep}_{local_experts} has no {arch} build")
+    run = run_ranks_isolated(1, workers.group_layout_overflow, ep, local_experts, topk, 1, timeout=OVERFLOW_TIMEOUT)
+    record_property("overflow_run", {"returncode": run["returncode"], "timed_out": run["timed_out"]})
+    assert not run["timed_out"], run["log"][-4000:]
+    assert run["returncode"] != 0, run["log"][-4000:]
+    kind, text = run["records"][0] or (None, run["log"][-4000:])
+    assert kind == "error" and workers.SCHEDULE_TRAPPED in text, text
+    trap = text[text.rindex(workers.SCHEDULE_TRAPPED) :].strip()
+    record_property("trap_error", trap)
+    assert TRAP_ERROR in trap, text
+    (fits,) = run_ranks(1, workers.group_layout_overflow, ep, local_experts, topk, 0)
+    assert fits["rows"] == fits["padded"] == fits["capacity"], fits

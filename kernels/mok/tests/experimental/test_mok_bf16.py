@@ -2492,10 +2492,10 @@ BOUND_LAYOUTS = [(64, 6), (8, 48)]
 BOUND_IDS = ["ep64-local6", "ep8-local48"]
 
 
-def _mode_group_roles(group):
+def _mode_group_roles(group, layouts=None):
     """The roles only the :data:`MODE_GROUPS` group ``group`` loads: its fused kernels (the direct-gradient backward;
     with SiTU-GLU also the forward, the context-free forward and the recompute, all without a shared expert), its
-    epilogues, its shared-scale helpers and its layouts' scheduler kernels."""
+    epilogues, its shared-scale helpers and its layouts' scheduler kernels (only those of ``layouts`` when given)."""
     situ = group.activation == "situ_glu"
     roles = []
     if situ:
@@ -2525,15 +2525,15 @@ def _mode_group_roles(group):
             f"epilogue_forward_none_{group.topk}",
             f"epilogue_backward_none_{group.topk}",
         ]
-    for ep, experts in group.layouts:
+    for ep, experts in group.layouts if layouts is None else layouts:
         roles += [f"count_{ep}_{experts}", f"rows_{ep}_{experts}"]
     return tuple(roles)
 
 
 #: The roles only a :data:`MODE_GROUPS` group loads (the 512-expert top-10 group: the direct-gradient backward, the
-#: scaled top-10 epilogues, the two shared-scale helpers and the (8, 64) scheduler kernels; the 896-expert top-16
-#: group: the SiTU-GLU forward, context-free forward, recompute and direct-gradient backward without a shared expert,
-#: the top-16 epilogues without a shared row and the (64, 14) scheduler kernels).
+#: scaled top-10 epilogues, the two shared-scale helpers and the (8, 64) and (16, 32) scheduler kernels; the
+#: 896-expert top-16 group: the SiTU-GLU forward, context-free forward, recompute and direct-gradient backward without
+#: a shared expert, the top-16 epilogues without a shared row and the (64, 14) and (32, 28) scheduler kernels).
 MODE_GROUP_ROLES = tuple(
     role for group in kernels.MODE_GROUPS.values() for role in _mode_group_roles(group)
 )
@@ -3281,7 +3281,7 @@ def test_mode_group_configurations_outside_the_group_are_refused(layout, topk, c
     the group's configuration raises ``ValueError`` naming the group's configuration and the one given."""
     with pytest.raises(
         ValueError,
-        match=r"512 routed experts at top-k 10 .* runs \(EP, local experts\) \(8, 64\)",
+        match=r"512 routed experts at top-k 10 .* runs \(EP, local experts\) \(8, 64\), \(16, 32\) at topk=10",
     ):
         kernels.check_configuration(*layout, topk, **{**GROUP_OK, **change})
 
@@ -3289,12 +3289,15 @@ def test_mode_group_configurations_outside_the_group_are_refused(layout, topk, c
 def test_mode_group_configuration_is_checked_before_device_work(monkeypatch):
     """Host only: ``check_configuration`` admits the group's configuration and returns its name, and the default
     modes keep every existing configuration (returning None); ``check_target`` accepts the group on SM100a, SM103a
-    and SM107a and refuses it elsewhere with a message naming the three.  On each of the three the adapter loads the
-    group's roles (the direct-gradient backward, the scaled top-10 epilogues, the shared-scale helpers, the (8, 64)
-    scheduler kernels) and none of the quotient backward or the unscaled epilogues."""
+    and SM107a and refuses it elsewhere with a message naming the three.  On each of the three, at each of the
+    group's layouts, the adapter loads the group's roles (the direct-gradient backward, the scaled top-10 epilogues,
+    the shared-scale helpers, the scheduler kernels of that layout) and none of the quotient backward, the unscaled
+    epilogues or another layout's scheduler kernels."""
     group = kernels.MODE_GROUPS["scaled_top10"]
     assert group.targets == ("sm_100a", "sm_103a", "sm_107a")
-    assert kernels.check_configuration(8, 64, 10, **GROUP_OK) == "scaled_top10"
+    assert group.layouts == ((8, 64), (16, 32)) and group.topk == 10
+    for layout in group.layouts:
+        assert kernels.check_configuration(*layout, 10, **GROUP_OK) == "scaled_top10"
     defaults = dict(
         clamped_swiglu=False, fp32_wgrad=False, router_weight_position="after_down"
     )
@@ -3318,16 +3321,19 @@ def test_mode_group_configuration_is_checked_before_device_work(monkeypatch):
     )
     for arch in group.targets:
         monkeypatch.setattr(jit, "target_arch", lambda device=None, arch=arch: arch)
-        loaded.clear()
-        functional = backend.MoKFunctional(8, 64, 10, **keywords)
-        assert (
-            functional.group == "scaled_top10" and functional.shared_expert == "scaled"
-        )
-        assert set(_mode_group_roles(group)) <= set(loaded), sorted(loaded)
-        assert {"forward", "pad_8", "gather", "barrier", "expert_layout"} <= set(loaded)
-        assert not {"backward_fp32", "epilogue_forward_8", "epilogue_backward_8"} & set(
-            loaded
-        )
+        for ep, experts in group.layouts:
+            loaded.clear()
+            functional = backend.MoKFunctional(ep, experts, 10, **keywords)
+            assert (
+                functional.group == "scaled_top10" and functional.shared_expert == "scaled"
+            )
+            own = set(_mode_group_roles(group, ((ep, experts),)))
+            assert own <= set(loaded), sorted(loaded)
+            assert not (set(_mode_group_roles(group)) - own) & set(loaded), sorted(loaded)
+            assert {"forward", f"pad_{ep}", "gather", "barrier", "expert_layout"} <= set(loaded)
+            assert not {"backward_fp32", "epilogue_forward_8", "epilogue_backward_8"} & set(
+                loaded
+            )
 
 
 def test_mode_values_and_mode_types_are_refused():
@@ -3489,7 +3495,10 @@ def test_situ_group_configurations_outside_the_group_are_refused(layout, topk, c
     configuration and the one given."""
     with pytest.raises(
         ValueError,
-        match=r"896 routed experts at top-k 16 .* runs \(EP, local experts\) \(64, 14\) at topk=16",
+        match=(
+            r"896 routed experts at top-k 16 .* runs \(EP, local experts\) "
+            r"\(64, 14\), \(32, 28\) at topk=16"
+        ),
     ):
         kernels.check_configuration(*layout, topk, **{**SITU_OK, **change})
 
@@ -3497,14 +3506,15 @@ def test_situ_group_configurations_outside_the_group_are_refused(layout, topk, c
 def test_situ_group_configuration_is_checked_before_device_work(monkeypatch):
     """Host only: ``check_configuration`` admits the 896-expert top-16 group's configuration and returns its name;
     ``check_target`` accepts the group on SM100a, SM103a and SM107a and refuses it elsewhere with a message naming the
-    three.  On each of them the adapter (prepared for the context-free forward and the recompute) loads the group's
-    roles (the SiTU-GLU forward, context-free forward, recompute and backward
-    without a shared expert, the top-16 epilogues without a shared row, the (64, 14) scheduler kernels) and none of
-    the SwiGLU fused kernels or the top-8 epilogues."""
+    three.  On each of them, at each of the group's layouts, the adapter (prepared for the context-free forward and
+    the recompute) loads the group's roles (the SiTU-GLU forward, context-free forward, recompute and backward
+    without a shared expert, the top-16 epilogues without a shared row, the scheduler kernels of that layout) and
+    none of the SwiGLU fused kernels, the top-8 epilogues or another layout's scheduler kernels."""
     group = SITU_GROUP
     assert group.targets == ("sm_100a", "sm_103a", "sm_107a")
-    assert group.layouts == ((64, 14),) and group.topk == 16
-    assert kernels.check_configuration(64, 14, 16, **SITU_OK) == "situ_top16"
+    assert group.layouts == ((64, 14), (32, 28)) and group.topk == 16
+    for layout in group.layouts:
+        assert kernels.check_configuration(*layout, 16, **SITU_OK) == "situ_top16"
     for arch in group.targets:
         kernels.check_target("after_down", arch, "situ_top16")
     with pytest.raises(
@@ -3518,16 +3528,19 @@ def test_situ_group_configuration_is_checked_before_device_work(monkeypatch):
     keywords = {key: SITU_OK[key] for key in ("fp32_wgrad", "router_weight_gradient", "shared_expert", "activation")}
     for arch in group.targets:
         monkeypatch.setattr(jit, "target_arch", lambda device=None, arch=arch: arch)
-        loaded.clear()
-        functional = backend.MoKFunctional(64, 14, 16, **keywords)
-        functional.prepare(None, save_context=False)
-        functional.prepare_recompute(None)
-        assert functional.group == "situ_top16"
-        assert functional.shared_expert == "none" and functional.activation == "situ_glu"
-        assert set(_mode_group_roles(group)) <= set(loaded), sorted(loaded)
-        assert {"pad_64", "gather", "barrier", "expert_layout"} <= set(loaded)
-        swiglu = {"forward", "forward_noctx", "recompute", "backward_fp32", "backward_fp32_direct"}
-        assert not (swiglu | {"epilogue_forward_8", "epilogue_backward_8"}) & set(loaded)
+        for ep, experts in group.layouts:
+            loaded.clear()
+            functional = backend.MoKFunctional(ep, experts, 16, **keywords)
+            functional.prepare(None, save_context=False)
+            functional.prepare_recompute(None)
+            assert functional.group == "situ_top16"
+            assert functional.shared_expert == "none" and functional.activation == "situ_glu"
+            own = set(_mode_group_roles(group, ((ep, experts),)))
+            assert own <= set(loaded), sorted(loaded)
+            assert not (set(_mode_group_roles(group)) - own) & set(loaded), sorted(loaded)
+            assert {f"pad_{ep}", "gather", "barrier", "expert_layout"} <= set(loaded)
+            swiglu = {"forward", "forward_noctx", "recompute", "backward_fp32", "backward_fp32_direct"}
+            assert not (swiglu | {"epilogue_forward_8", "epilogue_backward_8"}) & set(loaded)
 
 
 def _situ_launcher_problem(topk=16):
@@ -4795,12 +4808,12 @@ def _situ_problem(tokens, hidden, intermediate, experts, topk, seed, device):
     return p
 
 
-def _situ_adapter(tokens, hidden, macro, mini, device, counts=None):
-    """The 896-expert top-16 group's adapter as rank 0 of EP64 ``(64, 14)`` emulated on one GPU (:class:`OneGpuGroup`,
-    every route on this rank), prepared for the context and the context-free forward and the recompute; its workspace
-    (at the multiplier of every route on one rank, :func:`one_rank_multiplier`; with ``counts`` a source workspace for
-    those counts) and its config."""
-    ep, experts = SITU_GROUP.layouts[0]
+def _situ_adapter(tokens, hidden, macro, mini, device, counts=None, layout=None):
+    """The 896-expert top-16 group's adapter as rank 0 of EP64 ``(64, 14)`` (or of the group's ``layout``) emulated on
+    one GPU (:class:`OneGpuGroup`, every route on this rank), prepared for the context and the context-free forward and
+    the recompute; its workspace (at the multiplier of every route on one rank, :func:`one_rank_multiplier`; with
+    ``counts`` a source workspace for those counts) and its config."""
+    ep, experts = SITU_GROUP.layouts[0] if layout is None else layout
     topk = SITU_GROUP.topk
     functional = backend.MoKFunctional(ep, experts, topk, **SITU_OK)
     functional.communication = OneGpuGroup()
@@ -5485,6 +5498,121 @@ def test_situ_scheduler_at_the_capacity_bound():
             assert total.item() >= experts * tokens * ep
         if rank == 2:
             assert total.item() == 0
+        offset = 0
+        for expert, count in enumerate(expected_counts.tolist()):
+            p = peers[offset : offset + count].long()
+            t = slots[offset : offset + count].long()
+            valid = p >= 0
+            actual = (p[valid] * tokens * topk + t[valid]).sort().values
+            expected = (ids.flatten() == rank * experts + expert).nonzero().flatten()
+            assert torch.equal(actual, expected), (rank, expert)
+            offset += count
+        assert (peers[offset:] == -1).all()
+        assert torch.equal(scheduler.owner_loads().long(), backend.count_routed_load(ids, ep, experts))
+    scheduler.release_counts()
+
+
+#: The layouts of each :data:`MODE_GROUPS` group after its first, whose tests above run at the first layout:
+#: ``(group name, (EP, local experts))``.  Each has at least as many local experts as the group's top-k.
+ADDED_GROUP_LAYOUTS = [
+    (name, layout) for name, group in kernels.MODE_GROUPS.items() for layout in group.layouts[1:]
+]
+ADDED_GROUP_IDS = [f"{name}-ep{ep}-local{experts}" for name, (ep, experts) in ADDED_GROUP_LAYOUTS]
+
+
+def _require_group_layout(name, layout):
+    """Skip on a device without the group's kernels or the layout's scheduler kernels (:func:`_require_role`)."""
+    ep, experts = layout
+    roles = SITU_KERNELS if kernels.MODE_GROUPS[name].activation == "situ_glu" else GROUP_KERNELS
+    for role in (*roles, f"count_{ep}_{experts}", f"rows_{ep}_{experts}"):
+        _require_role(role)
+
+
+@pytest.mark.parametrize("name,layout", ADDED_GROUP_LAYOUTS, ids=ADDED_GROUP_IDS)
+def test_group_layout_adapter_step(name, layout):
+    """The adapter step of a group at one of its later layouts, emulated on one GPU as rank 0 (every route on this
+    rank, distinct experts per token, several macrobatches): the values of :func:`_group_step` (the 512-expert group,
+    512 source rows) or of :func:`_situ_step` (the 896-expert group, 256 source rows); the context step and the
+    checkpointed step (context-free forward, recompute, backward) give the same bytes, run to run and in a CUDA Graph
+    replay; a zero router weight has a nonzero gradient; a steady-state step (``build_schedule``, context-free forward,
+    recompute, backward) makes no host synchronization (``torch.cuda.set_sync_debug_mode("error")``).  Accuracy:
+    ``test_mok_accuracy.py``."""
+    _require_group_layout(name, layout)
+    ep, experts = layout
+    device = torch.device("cuda", torch.cuda.current_device())
+    if name == "scaled_top10":
+        tokens, hidden, intermediate, macro, mini = 512, 512, 256, 1536, 256
+        functional, workspace, config = _group_adapter(ep, experts, tokens, hidden, macro, mini, device)
+        p = _cpu_problem(tokens, hidden, intermediate, experts, GROUP_TOPK, 7501, device)
+        accumulators = [torch.zeros(w.shape, device=device) for w in p["weights"]]
+        d_weights = D_WEIGHTS
+
+        def step(checkpointed=False, schedule=None):
+            return _group_step(
+                functional, config, workspace, p, accumulators, checkpointed=checkpointed, shared_scale=p["scale"],
+                schedule=schedule,
+            )  # fmt: skip
+
+    else:
+        tokens, hidden, intermediate, macro, mini = 256, 512, 256, 8192, 256
+        functional, workspace, config = _situ_adapter(tokens, hidden, macro, mini, device, layout=layout)
+        p = _situ_problem(tokens, hidden, intermediate, experts, SITU_GROUP.topk, 7801, device)
+        accumulators = [torch.zeros(w.shape, device=device) for w in p["weights"][3:]]
+        d_weights = SITU_D_WEIGHTS
+
+        def step(checkpointed=False, schedule=None):
+            return _situ_step(
+                functional, config, workspace, p, accumulators, checkpointed=checkpointed, schedule=schedule
+            )  # fmt: skip
+
+    values, schedule = step()
+    first = _snapshot(values)
+    assert int(schedule.num_tokens.item()) > macro  # several macrobatches: backward replays the later ones
+    assert _same_bits(first, _snapshot(step(schedule=schedule)[0]))
+    assert _same_bits(first, _snapshot(step(True, schedule=schedule)[0]))
+    assert torch.count_nonzero(first[d_weights][p["scores"] == 0]).item() > 0
+    # Steady state: every kernel loaded, the schedule's load observation in flight.
+    torch.cuda.synchronize()
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        steady, _ = step(True)
+    finally:
+        torch.cuda.set_sync_debug_mode("default")
+    assert _same_bits(first, _snapshot(steady))
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        step(True, schedule=schedule)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        captured, _ = step(True, schedule=schedule)
+    for _ in range(2):
+        graph.replay()
+        assert _same_bits(first, _snapshot(captured))
+
+
+@pytest.mark.parametrize("name,layout", ADDED_GROUP_LAYOUTS, ids=ADDED_GROUP_IDS)
+def test_group_layout_scheduler_at_the_capacity_bound(name, layout):
+    """At a group's later layout, its top-k, 16,384 source rows per rank and the worst-case multiplier
+    (:func:`bound_multiplier`), the full skew to rank 0 (every token of every rank routes to top-k distinct experts of
+    rank 0) fits: the scheduler's per-expert counts and rows are exact on rank 0 (every route) and on rank 1
+    (nothing), each total within the capacity."""
+    _require_group_layout(name, layout)
+    (ep, experts), topk = layout, kernels.MODE_GROUPS[name].topk
+    tokens = 16384
+    capacity = workspace_module.schedule_capacity_for(tokens, topk, ep, bound_multiplier(tokens, topk, ep, experts))
+    order = rand(ep * tokens, experts, generator=torch.Generator().manual_seed(4423)).argsort(-1)
+    ids = order[:, :topk].int().reshape(ep, tokens, topk).to("cuda").contiguous()
+    scheduler = MoKScheduler(ep, experts)
+    for rank in (0, 1):
+        peers, slots, total, counts = scheduler(ids, capacity, rank)
+        expected_counts = torch.bincount(ids.flatten().long(), minlength=ep * experts)
+        expected_counts = expected_counts[rank * experts : (rank + 1) * experts]
+        expected_counts = ((expected_counts + 255) // 256) * 256
+        assert torch.equal(counts, expected_counts.int())
+        assert total.item() == expected_counts.sum().item() <= capacity
+        assert total.item() >= topk * tokens * ep if rank == 0 else total.item() == 0
         offset = 0
         for expert, count in enumerate(expected_counts.tolist()):
             p = peers[offset : offset + count].long()
