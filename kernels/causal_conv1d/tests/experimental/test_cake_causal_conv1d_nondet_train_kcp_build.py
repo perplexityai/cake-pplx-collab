@@ -476,27 +476,28 @@ def test_overlapped_backward_records() -> None:
 
 
 @pytest.mark.cpu_only
-@pytest.mark.parametrize("sms", [132, 148, 160, 188])
+@pytest.mark.parametrize("sms", [132, 148, 152, 160, 188, 212])
 def test_dyn_plan_meets_the_kernel_requirements(sms) -> None:
     """:func:`kcp_jit.dyn_plan` gives every work plan the main program's ``kernel_requires`` admit: ``L`` lanes of
     ``P`` per tile of 2048 channels, at most 256; one CTA per SM and at least one per lane; units of ``M`` tokens (a
     multiple of 8, at least 24); ``NL`` units per lane covering the rank's tokens; the claim words' 16-bit counts.
-    The same with each world size of the context-parallel unit table."""
+    The same with each world size of the context-parallel unit table and each architecture of its measured parts."""
 
     for C in (8, 512, 1024, 2048, 2056, 8192, 10240, 32768, 65536):
         n_tiles = -(-C // kcp_jit.DYN_TILE)
-        for S in (1, 7, 64, 1003, 2048, 4096, 16384, 32768, 1 << 20, 1 << 23):
+        for S in (1, 7, 64, 1003, 2048, 4096, 8192, 12288, 16384, 18432, 24576, 32768, 1 << 20, 1 << 23):
             for ws in (None, 2, 4, 8):
-                p = kcp_jit.dyn_plan(S, C, sms, world_size=ws)
-                label = (sms, C, S, ws, p)
-                assert p["n_tiles"] == n_tiles and p["L"] == n_tiles * p["P"], label
-                assert 1 <= p["P"] <= 512 and p["L"] <= kcp_jit.DYN_MAX_LANES, label
-                assert p["n_ctas"] == max(p["L"], sms), label
-                assert p["M"] % 8 == 0 and p["M"] >= 24, label
-                assert 1 <= p["NL"] <= 32768 and p["P"] * p["NL"] * p["M"] >= S, label
-                assert (p["L"] + 1) * p["NL"] + p["n_ctas"] <= 65535, label
-                if sms * p["M"] <= S and n_tiles <= sms:
-                    assert p["L"] >= sms - n_tiles + 1, label
+                for arch in (None, "sm_100a", "sm_103a", "sm_107a"):
+                    p = kcp_jit.dyn_plan(S, C, sms, world_size=ws, arch=arch)
+                    label = (sms, C, S, ws, arch, p)
+                    assert p["n_tiles"] == n_tiles and p["L"] == n_tiles * p["P"], label
+                    assert 1 <= p["P"] <= 512 and p["L"] <= kcp_jit.DYN_MAX_LANES, label
+                    assert p["n_ctas"] == max(p["L"], sms), label
+                    assert p["M"] % 8 == 0 and p["M"] >= 24, label
+                    assert 1 <= p["NL"] <= 32768 and p["P"] * p["NL"] * p["M"] >= S, label
+                    assert (p["L"] + 1) * p["NL"] + p["n_ctas"] <= 65535, label
+                    if sms * p["M"] <= S and n_tiles <= sms:
+                        assert p["L"] >= sms - n_tiles + 1, label
     for S, C in ((0, 1024), (16, 0), (16, kcp_jit.DYN_MAX_CHANNELS + 8)):
         with pytest.raises(ValueError):
             kcp_jit.dyn_plan(S, C, 148)
@@ -670,6 +671,111 @@ def test_dyn_plan_context_parallel_table() -> None:
                         assert p == today, label
                     else:
                         taken[unit] += 1
+                        assert p == want, label
+    assert all(n > 0 for n in taken.values()), taken
+
+
+@pytest.mark.cpu_only
+def test_dyn_plan_unit_table_measured_parts() -> None:
+    """With ``world_size`` and ``arch``, a call on the table's measured parts (148-SM sm_100a at world sizes 2, 4 and
+    8; 152-SM sm_103a and 212-SM sm_107a at 2 and 4; at most 512 channels and 32768 tokens on the rank) tries
+    40-token units on sm_107a at world sizes 2 and 4 from 16384 tokens (at most 2 units per lane), then 56-token
+    units at world size 2 from 8192 tokens and on sm_103a at world size 4 from 16384 tokens (both with the lane-run
+    check), and without a table unit takes the 56-token idle-unit plan only when its lanes' runs are no longer than
+    the 64-token plan's.  Every other call keeps the plan without ``arch``."""
+
+    dyn = kcp_jit.dyn_plan
+    applies = kcp_jit.dyn_cp_v2_applies
+
+    def plan_for(S, C, sms, M):
+        n_tiles = -(-C // kcp_jit.DYN_TILE)
+        P = max(1, min(sms // n_tiles, -(-S // M), kcp_jit.DYN_MAX_LANES // n_tiles))
+        NL = -(-(-(-S // P)) // M)
+        L = n_tiles * P
+        n_ctas = max(L, sms)
+        if (L + 1) * NL + n_ctas > 65535 or NL > 32768:
+            return None
+        return {"M": M, "NL": NL, "P": P, "L": L, "n_ctas": n_ctas, "n_tiles": n_tiles}
+
+    def run(p):
+        return p["NL"] * p["M"]
+
+    def mnp(p):
+        return (p["M"], p["NL"], p["P"])
+
+    # the parts and their edges
+    for arch, sms, worlds in (("sm_100a", 148, (2, 4, 8)), ("sm_103a", 152, (2, 4)), ("sm_107a", 212, (2, 4))):
+        for ws in (1, 2, 3, 4, 8, 16):
+            assert applies(arch, sms, ws, 16384, 512) == (ws in worlds), (arch, ws)
+        assert applies(arch, sms, 2, 32768, 512) and not applies(arch, sms, 2, 32769, 512), arch
+        assert applies(arch, sms, 2, 1, 512) and not applies(arch, sms, 2, 0, 512), arch
+        assert not applies(arch, sms, 2, 16384, 513), arch
+        assert not applies(arch, sms, None, 16384, 512) and not applies(None, sms, 2, 16384, 512), arch
+        for other in (132, 148, 152, 160, 188, 212, 216):
+            if other != sms:
+                assert not applies(arch, other, 2, 16384, 512), (arch, other)
+    # the measured rows (C 512, world size 2 unless named): (arch, sms, ws, S) -> (M, NL, P) with arch, and without
+    pins = {
+        ("sm_100a", 148, 2, 18432): ((64, 2, 148), (56, 3, 148)),
+        ("sm_103a", 152, 2, 18432): ((64, 2, 152), (56, 3, 152)),
+        ("sm_107a", 212, 2, 24576): ((64, 2, 212), (56, 3, 212)),
+        ("sm_107a", 212, 2, 16384): ((40, 2, 212), (56, 2, 212)),
+        ("sm_107a", 212, 4, 16384): ((40, 2, 212), (64, 2, 212)),
+        ("sm_100a", 148, 2, 12288): ((56, 2, 148), (64, 2, 148)),
+        ("sm_103a", 152, 2, 12288): ((56, 2, 152), (64, 2, 152)),
+        ("sm_107a", 212, 2, 8192): ((56, 1, 147), (64, 1, 128)),
+        ("sm_107a", 212, 2, 12288): ((64, 1, 192), (64, 1, 192)),
+        ("sm_103a", 152, 4, 16384): ((56, 2, 152), (64, 2, 152)),
+        ("sm_107a", 212, 2, 32768): ((56, 3, 212), (56, 3, 212)),
+        ("sm_103a", 152, 8, 18432): ((56, 3, 152), (56, 3, 152)),
+        ("sm_107a", 216, 2, 24576): ((56, 3, 216), (56, 3, 216)),
+    }
+    for (arch, sms, ws, S), (with_arch, without) in pins.items():
+        assert mnp(dyn(S, 512, sms, world_size=ws, arch=arch)) == with_arch, (arch, sms, ws, S)
+        assert mnp(dyn(S, 512, sms, world_size=ws)) == without, (arch, sms, ws, S)
+    # every call: on the parts the units in order, then the guarded idle-unit plan; elsewhere the plan without arch
+    edges = (1, 7, 1003, 2048, 2049, 4096, 4097, 8191, 8192, 12288, 14336, 16383, 16384, 16960, 16961, 18432)
+    large = (20480, 24576, 26624, 28672, 32768, 32769, 65536, 1 << 20)
+    taken = {32: 0, 40: 0, 56: 0, "guard": 0, "other": 0}
+    for arch in ("sm_100a", "sm_103a", "sm_107a"):
+        for sms in (132, 148, 152, 160, 188, 212, 216):
+            for C in (8, 256, 512, 513, 2048):
+                for S in (*edges, *large):
+                    today = dyn(S, C, sms)
+                    assert dyn(S, C, sms, world_size=None, arch=arch) == today, (arch, sms, C, S)
+                    for ws in (1, 2, 3, 4, 8, 16):
+                        p = dyn(S, C, sms, world_size=ws, arch=arch)
+                        label = (arch, sms, C, S, ws, p)
+                        if not applies(arch, sms, ws, S, C):
+                            assert p == dyn(S, C, sms, world_size=ws), label
+                            continue
+                        ref = plan_for(S, C, sms, 64)
+                        short = kcp_jit.DYN_CP_SHORT_TOKENS.get(ws)
+                        units = []
+                        if short is not None and S <= short:
+                            units = [32]
+                        else:
+                            if arch == "sm_107a" and ws in (2, 4) and S >= 16384:
+                                units.append(40)
+                            if (ws == 2 and S >= 8192) or (arch == "sm_103a" and ws == 4 and S >= 16384):
+                                units.append(56)
+                        want = None
+                        for unit in units:
+                            cp = plan_for(S, C, sms, unit)
+                            if cp is not None and unit != 32:
+                                if ref is None or run(cp) > run(ref) or (unit == 40 and cp["NL"] > 2):
+                                    cp = None
+                            if cp is not None:
+                                want = cp
+                                taken[unit] += 1
+                                break
+                        if want is None:
+                            if today["M"] == 56 and ref is not None and run(today) > run(ref):
+                                want = ref
+                                taken["guard"] += 1
+                            else:
+                                want = today
+                                taken["other"] += 1
                         assert p == want, label
     assert all(n > 0 for n in taken.values()), taken
 

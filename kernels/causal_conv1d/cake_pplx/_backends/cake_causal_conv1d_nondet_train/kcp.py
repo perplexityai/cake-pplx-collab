@@ -71,8 +71,9 @@ their rows in place in the received pool and run concurrently
 changes.
 
 The plan of the main program is :func:`kcp_jit.dyn_plan` with the call's
-world size (units of ``M`` tokens, ``P`` lanes per 2048-channel tile, one CTA
-per SM).  A call that reserves SMs (``bwd_reserve_sms >= 1``), has more than
+world size and the device's architecture (units of ``M`` tokens, ``P`` lanes per
+2048-channel tile, one CTA per SM).  A call that reserves SMs
+(``bwd_reserve_sms >= 1``), has more than
 :data:`kcp_jit.DYN_MAX_CHANNELS` channels or no token runs the one-program
 backward (kind ``kcp_bwd``) after the wait instead: one ordinary launch whose
 CTAs add their FP32 ``dweight`` CTA rows into the zeroed FP32 accumulators
@@ -1030,9 +1031,10 @@ def _dyn_host(
     ``tail_row_off`` (and as ``skip_row_off`` when it writes every row), and the tail-row program's launch plan over
     :func:`head_grid` (``None`` when the rank receives no tail row: the main program then writes every row as the
     single program does).  ``pair``: the main program is the ``kcp_bwd_dyn_pair`` route's (same plan and workspace).
-    ``world_size``: the call's context-parallel world size (:func:`dyn_plan`'s context-parallel unit table)."""
+    ``world_size``: the call's context-parallel world size (:func:`dyn_plan`'s context-parallel unit table, and with
+    ``arch`` its measured parts)."""
     (main,) = route_modules(arch, KCP_BWD_DYN_PAIR if pair else KCP_BWD_DYN)
-    p = dyn_plan(S, C, _loader.sm_count(device_index), world_size=world_size)
+    p = dyn_plan(S, C, _loader.sm_count(device_index), world_size=world_size, arch=arch)
     halo = None
     if tail_rows > 0:
         (halo_name,) = route_modules(arch, KCP_BWD_HALO)
