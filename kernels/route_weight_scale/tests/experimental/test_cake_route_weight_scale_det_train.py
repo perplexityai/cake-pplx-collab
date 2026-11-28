@@ -22,12 +22,12 @@ Without a device: the registry (nine records, ``<stage>_h<width>``, ``fwd_h4096_
 ``fwd_h3584_flat``, ``bwd_h4096_warp`` and ``bwd_h3584_warp``, each delivered for the three architectures, its launch
 facts, its rows (or elements) per CTA and its argument plan in the order the host passes it; literal tables the
 exporter reads), the route table of each architecture (bands of row counts from 1 in increasing order, each naming a
-record of its stage and width and a grid cap) and the record and cap of each call, the launch grid (``nblocks =
-ceil(rows / rows_per_cta)`` CTAs, or ``ceil(rows * H / elements_per_cta)`` for a flat record, at most ``2**31 -
-nblocks``, and with a cap at most that many CTAs per SM), the refusal of a record that takes its parameters in another
-order, the capability map, the operand checks
-(dtype, shape, width, strides, alignment, ``w`` and ``dw`` layout, CPU tensors), the build manifest (every record's
-library, the recorded source digests) and no environment read outside the JIT shim.
+record of its stage and width and a grid cap), the record and cap of each call and the record and grid the launch takes
+on the device's architecture, the launch grid (``nblocks = ceil(rows / rows_per_cta)`` CTAs, or ``ceil(rows * H /
+elements_per_cta)`` for a flat record, at most ``2**31 - nblocks``, and with a cap at most that many CTAs per SM), the
+refusal of a record that takes its parameters in another order, the capability map, the operand checks (dtype, shape,
+width, strides, alignment, ``w`` and ``dw`` layout, CPU tensors), the build manifest (every record's library, the
+recorded source digests) and no environment read outside the JIT shim.
 
 On SM100 / SM103 / SM107, the contract of issue #259, each without a tolerance where the contract is exact:
 
@@ -193,7 +193,8 @@ def _step(x, dy, w) -> dict[str, torch.Tensor]:
 
 
 def _band_rows(bands) -> set[int]:
-    """The row counts that check one route of ``ROUTES``: one below, at and one above the first row of every band
+    """The row counts that check one route of a route table (``cake_jit.routes(arch)``): one below, at and one above
+    the first row of every band
     past the first, and for every band with a grid cap one row count inside it (its midpoint, ``first + 1000`` for the
     last band)."""
     rows: set[int] = set()
@@ -398,6 +399,29 @@ def test_a_record_that_takes_another_order_is_refused(monkeypatch) -> None:
         monkeypatch.undo()
         pkg.parameters.cache_clear()
         pkg._entry.cache_clear()
+
+@pytestmark_cpu
+def test_the_launch_takes_the_route_table_of_the_device_architecture(monkeypatch) -> None:
+    """``_launch`` takes the record and grid that ``cake_jit.route`` gives for the architecture of the call's device and
+    that device's SM count: on SM100 and SM103 the records of ``ROUTES``, on SM107 those of its own table."""
+    calls: list[tuple] = []
+    monkeypatch.setattr(pkg, "_sm_count", lambda index: 212)
+    monkeypatch.setattr(pkg, "_entry", lambda name, arch: lambda *arguments: calls.append((name, arch, arguments[-3:])))
+    shared = ("fwd_h4096_flat", "bwd_h4096", "fwd_h3584_flat", "bwd_h3584")
+    expected = {
+        "sm_100a": shared,
+        "sm_103a": shared,
+        "sm_107a": ("fwd_h4096_t32", "bwd_h4096_warp", "fwd_h3584", "bwd_h3584_warp"),
+    }
+    calls_of = (("fwd", 4096, 20000), ("bwd", 4096, 4000), ("fwd", 3584, 20000), ("bwd", 3584, 9000))
+    for arch, names in expected.items():
+        monkeypatch.setattr(pkg, "device_arch", lambda index, arch=arch: arch)
+        monkeypatch.setattr(pkg, "_ENTRIES", {})
+        for (stage, width, rows), name in zip(calls_of, names):
+            pkg._launch(stage, width, 0, rows, "operand")
+            record, cap = cake_jit.route(stage, width, rows, arch)
+            assert record == name, (arch, stage, width, rows, record)
+            assert calls[-1] == (name, arch, cake_jit.grid(rows, name, cap, 212)), (arch, stage, width, rows)
 
 
 @pytestmark_cpu
@@ -851,8 +875,9 @@ def test_one_library_per_record_serves_every_row_count(device, monkeypatch) -> N
 
 @pytest.mark.parametrize("name", RECORDS)
 def test_every_record_gives_the_contract_bits_on_its_full_grid(name, device) -> None:
-    """Each record, launched directly through its FFI entry on its full grid, stores the contract's bits at one row, a
-    partial block and a count past several blocks, whether or not the device's route table takes it."""
+    """Each record, launched directly through its FFI entry on its full grid, stores the contract's bits at one row,
+    5 rows (a partial block for every record whose block can be partial) and a count past several blocks, whether or
+    not the device's route table takes it."""
     record = cake_jit.MODULES[name]
     stage, width = record["stage"], record["width"]
     for rows in (1, 5, 4097):

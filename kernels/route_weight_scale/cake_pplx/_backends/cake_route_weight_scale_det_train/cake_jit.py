@@ -19,7 +19,7 @@ expert (SM100 / SM103 / SM107), deterministic.
 ``MODULES`` has nine records.  Four, keyed ``<stage>_h<width>``, are the
 programs of one stage and width each (no route takes ``fwd_h4096``; the tests
 launch it as the reference); the other five are further programs that the host
-takes in a band of row counts of the device's route table (:func:`routes`):
+takes in bands of row counts of an architecture's route table (:func:`routes`):
 ``fwd_h4096_t32``, a forward at H = 4096, ``fwd_h4096_flat`` and
 ``fwd_h3584_flat``, the forward of each width for many rows, and
 ``bwd_h4096_warp`` and ``bwd_h3584_warp``, the backward of each width one warp
@@ -79,8 +79,9 @@ of a warp is contiguous.  Five kinds of program:
   consecutive rows, one warp a row (``rows_per_cta`` 4).  Each lane sums its
   16 (H = 4096) or 14 (H = 3584) loads in the order of the ``dw`` tree above
   and the warp makes the five XOR shuffles, so it stores the same ``dx`` and
-  ``dw`` bits as ``bwd_h<width>``.  The host takes it in its band of the
-  route table.
+  ``dw`` bits as ``bwd_h<width>``.  The host takes them in bands of the
+  route tables: ``bwd_h3584_warp`` in one band of :data:`ROUTES`, both in two
+  bands of the SM107 table.
 
 Every program of one stage and width stores the same bits, whatever the row
 count and the grid.  Every program strides over its blocks (``rows_per_cta``
@@ -141,10 +142,15 @@ ROUTES: dict[str, tuple[tuple[int, str, int], ...]] = {
     ),
 }
 # The route tables of the architectures that take other bands than ``ROUTES`` (:func:`routes`), each with every key of
-# ``ROUTES``.  Measured on VR200 (SM107): the forward of one warp (H = 3584) or one CTA of 32 threads (H = 4096) a row
-# is faster than the flat forward at every row count.  The backward of one warp a row is faster than the four-warp
-# backward from 3328 rows, except just past one whole wave of its CTAs (few fit on an SM, so the next wave starts
-# nearly empty): there, up to the first row of its next band, the four-warp backward on the full grid is the faster.
+# ``ROUTES``.  Measured on VR200 (SM107, 212 SMs): the forward of one warp (H = 3584) or one CTA of 32 threads (H = 4096)
+# a row is faster than the flat forward at every measured row count (4097 to 655360).  The backward of one warp a row
+# is faster than the four-warp backward from 3328 rows up to one whole wave of its CTAs (5088 rows at H = 4096, 5936 at
+# H = 3584).  Few of its CTAs fit on an SM, so a call just past a whole wave starts a nearly empty wave, and there the
+# one-warp backward is up to 18 % slower.  So the table takes the four-warp backward on the full grid from one wave on,
+# up to 24576 rows (H = 4096) or 8192 rows (H = 3584); between the tails of those first waves the two are within about
+# 5 %.  From there on the one-warp backward is not slower at any measured row count, the wave tails included.  The band
+# bounds are row counts placed at VR200's wave: on an SM107 part with more SMs the first band of the one-warp backward
+# ends inside its first wave.
 ARCH_ROUTES: dict[str, dict[str, tuple[tuple[int, str, int], ...]]] = {
     "sm_107a": {
         "fwd_h4096": ((1, "fwd_h4096_t32", 0),),
@@ -183,8 +189,8 @@ MODULES: dict[str, dict[str, Any]] = {
         "stage": "fwd",
         "width": 4096,
     },
-    # The forward, H = 4096, for few rows: a CTA of 32 threads owns one row, with the instructions of fwd_h4096 (the
-    # same bits).  The host takes it in its band of ROUTES.
+    # The forward, H = 4096: a CTA of 32 threads owns one row, with the instructions of fwd_h4096 (the same bits).  The
+    # host takes it in its band of ROUTES (few rows) and at every row count in the SM107 route table.
     "fwd_h4096_t32": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "arg_plan": [["buffer", "x"], ["buffer", "w"], ["buffer", "y"], ["parameter", "rows"], ["parameter", "x_stride"], ["parameter", "y_stride"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
@@ -299,7 +305,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "width": 3584,
     },
     # The backward, H = 4096, one warp a row: a CTA of 128 threads owns 4 rows, each lane sums its 16 loads in the
-    # order of the dw tree (the same bits as bwd_h4096).  The host takes it in its band of the SM107 route table.
+    # order of the dw tree (the same bits as bwd_h4096).  The host takes it in its two bands of the SM107 route table.
     "bwd_h4096_warp": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "arg_plan": [["buffer", "x"], ["buffer", "dy"], ["buffer", "w"], ["buffer", "dx"], ["buffer", "dw"], ["parameter", "rows"], ["parameter", "x_stride"], ["parameter", "dy_stride"], ["parameter", "dx_stride"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],

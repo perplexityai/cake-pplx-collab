@@ -50,8 +50,9 @@ Host design:
   ``bwd_h3584_warp`` (one warp a row) in its band.  On SM107 the forward
   takes ``fwd_h4096_t32`` or ``fwd_h3584`` at every row count and the
   backward of each width takes ``bwd_h<H>_warp`` in two bands, from 3328 rows
-  to one whole wave of its CTAs and from a larger row count on.  All give the
-  same bits.  The grid is the record's
+  to 5088 (H = 4096) or 5936 (H = 3584) rows, one whole wave of its CTAs on
+  the 212 SMs of VR200, and from 24576 (H = 4096) or 8192 (H = 3584) rows on.
+  All give the same bits.  The grid is the record's
   (``cake_jit.grid``): one CTA per block of its ``rows_per_cta`` rows (4 for
   ``fwd_h4096``, ``fwd_h3584``, ``bwd_h4096_warp`` and ``bwd_h3584_warp``, 1
   for ``fwd_h4096_t32``, ``bwd_h4096`` and ``bwd_h3584``), or for a flat
