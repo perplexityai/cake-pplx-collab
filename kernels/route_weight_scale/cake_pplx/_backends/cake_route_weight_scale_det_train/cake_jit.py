@@ -145,13 +145,14 @@ ROUTES: dict[str, tuple[tuple[int, str, int], ...]] = {
 # ``ROUTES``.  Measured on VR200 (SM107, 212 SMs): the forward of one warp (H = 3584) or one CTA of 32 threads
 # (H = 4096) a row is faster than the flat forward at every measured row count (4097 to 655360).  The backward of one
 # warp a row is faster than the four-warp backward on a grid of 8 CTAs per SM from 3200 rows (H = 4096) or 3136 rows
-# (H = 3584), measured every 32 rows, up to one whole wave of its CTAs (5088 rows at H = 4096, 5936 at H = 3584).  Few
-# of its CTAs fit on an SM, so a call just past a whole wave starts a nearly empty wave, and there the one-warp backward
-# is up to 18 % slower.  So the table takes the four-warp backward on the full grid from one wave on, up to 24576 rows
-# (H = 4096) or 8192 rows (H = 3584); between the tails of those first waves the two are within about 5 %.  From there
-# on the one-warp backward is not slower at any measured row count, the wave tails included.  The band bounds are row
-# counts placed at VR200's wave: on an SM107 part with more SMs the first band of the one-warp backward ends inside its
-# first wave.
+# (H = 3584), the first row counts of a sweep in 32-row steps at which it is not slower on any timer, and at every
+# sampled row count above up to one whole wave of its CTAs (5088 rows at H = 4096, 5936 at H = 3584).  Few of its CTAs
+# fit on an SM, so a call just past a whole wave starts a nearly empty wave, and there the one-warp backward is up to
+# 18 % slower.  So the table takes the four-warp backward on the full grid from one wave on, up to 24576 rows (H = 4096)
+# or 8192 rows (H = 3584); between the tails of those first waves the two are within about 5 %.  From there on the
+# one-warp backward is not slower at any measured row count, the wave tails included.  The band bounds are row counts
+# placed at VR200's wave: on an SM107 part with more SMs the first band of the one-warp backward ends inside its first
+# wave.
 ARCH_ROUTES: dict[str, dict[str, tuple[tuple[int, str, int], ...]]] = {
     "sm_107a": {
         "fwd_h4096": ((1, "fwd_h4096_t32", 0),),

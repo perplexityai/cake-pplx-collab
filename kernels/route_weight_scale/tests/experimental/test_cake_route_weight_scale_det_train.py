@@ -405,7 +405,8 @@ def test_the_launch_takes_the_route_table_of_the_device_architecture(monkeypatch
     """``_launch`` takes the record and grid that ``cake_jit.route`` gives for the architecture of the call's device and
     that device's SM count: on SM100 and SM103 the records of ``ROUTES``, on SM107 those of its own table."""
     calls: list[tuple] = []
-    monkeypatch.setattr(pkg, "_sm_count", lambda index: 212)
+    # Device index 1 only: a launch that reads the architecture or SM count of another device raises KeyError.
+    monkeypatch.setattr(pkg, "_sm_count", lambda index: {1: 212}[index])
     monkeypatch.setattr(pkg, "_entry", lambda name, arch: lambda *arguments: calls.append((name, arch, arguments[-3:])))
     shared = ("fwd_h4096_flat", "bwd_h4096", "fwd_h3584_flat", "bwd_h3584")
     expected = {
@@ -415,10 +416,10 @@ def test_the_launch_takes_the_route_table_of_the_device_architecture(monkeypatch
     }
     calls_of = (("fwd", 4096, 20000), ("bwd", 4096, 4000), ("fwd", 3584, 20000), ("bwd", 3584, 9000))
     for arch, names in expected.items():
-        monkeypatch.setattr(pkg, "device_arch", lambda index, arch=arch: arch)
+        monkeypatch.setattr(pkg, "device_arch", lambda index, arch=arch: {1: arch}[index])
         monkeypatch.setattr(pkg, "_ENTRIES", {})
         for (stage, width, rows), name in zip(calls_of, names):
-            pkg._launch(stage, width, 0, rows, "operand")
+            pkg._launch(stage, width, 1, rows, "operand")
             record, cap = cake_jit.route(stage, width, rows, arch)
             assert record == name, (arch, stage, width, rows, record)
             assert calls[-1] == (name, arch, cake_jit.grid(rows, name, cap, 212)), (arch, stage, width, rows)
