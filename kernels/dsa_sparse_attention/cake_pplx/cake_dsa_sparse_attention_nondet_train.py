@@ -351,8 +351,8 @@ def cake_dsa_sparse_attention_nondet(
         ``sm_107a``, a tail row (``2 T <= S``, at least 131,072 keys; at most 3
         passes on ``sm_103a``); ``sm_107a`` runs a fixed 2 passes with a
         131,072-key floor; a count above 4 runs one pass; otherwise a single
-        pass runs.  Above 64 heads the head-window builds take no tail-row
-        passes on ``sm_103a`` (one pass there; one-chunk rows as above).  A
+        pass runs.  Above 64 heads a backward on the head-window builds runs
+        one pass on every row (from 0.13.1).  A
         row of more than one segment (``num_segments > 1``)
         runs one pass unless ``key_passes`` overrides.  ``key_passes=1``
         forces the single pass; a larger value forces that many passes

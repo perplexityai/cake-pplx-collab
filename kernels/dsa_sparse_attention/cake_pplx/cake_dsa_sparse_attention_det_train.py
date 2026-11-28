@@ -285,7 +285,8 @@ def cake_dsa_sparse_attention_det(
     key_passes : Optional[int]
         Validated as in the non-deterministic package (``None`` or
         ``1 <= key_passes <= S``).  ``None`` lets that package's key-pass policy
-        choose; a count above 1 runs the backward's main stage as that many
+        choose (one pass above 64 heads, from 0.13.1); a count above 1 runs the
+        backward's main stage as that many
         key-range passes (a compaction and a main pass each, with their scratch
         in the backward's workspace).  dK / dV are bit for bit those of one
         pass; dQ is summed through an FP32 partial between passes.

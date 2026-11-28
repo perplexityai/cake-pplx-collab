@@ -585,15 +585,13 @@ per-pass FP32 dQ-partial round trip and pipeline fill outweigh the L2 benefit
 (the `S = 225,280` / `267,520` one-chunk rows run one pass on `sm_100a` and
 `sm_103a`; `sm_107a`'s two passes are under the cap).  A record without
 `rules` (the first release) is the `sm_100a` rule everywhere.  Above 64
-heads the head-window builds plan with the rule of the architecture and the
-overrides of `cake_backend.HEAD_WINDOW_KEY_PASS_RULES`: on `sm_103a` and `sm_107a` no
-tail rows, so every tail row (more than one 4,224-token chunk, `2 T <= S`,
-131,072 or more keys, one segment) runs one pass there, the 16,380-token rows
-of 524,160 and 1,048,320 keys among them (see "Query heads above 64 (head
-windows)").  The tokens of a multi-pass backward run in chunks of 4224 (every
-chunk through every pass, `token_base` = the chunk's first token; 2,176 with
-the head-window builds above 64 heads, see "Query heads above 64 (head
-windows)"), so the pass scratch holds one chunk.  The passes split the whole key row
+heads a backward on the head-window builds plans one pass on every row and
+architecture (from 0.13.1); only `key_passes` selects passes there (see
+"Query heads above 64 (head windows)").  The tokens of a multi-pass backward
+run in chunks of 4224 (every chunk through every pass, `token_base` = the
+chunk's first token; 2,176 with the head-window builds above 64 heads, see
+"Query heads above 64 (head windows)"), so the pass scratch holds one chunk.
+The passes split the whole key row
 into equal ranges, which matches an index row whose keys spread over the whole
 row (one document); in a packed multi-segment row every token's keys lie
 inside its own segment, so the policy applies to one-segment rows only
@@ -734,31 +732,36 @@ skipped by every store.
      and the rope products are unchanged, so `dq` keeps its bits.
      `bwd_main_natural_hw` and the pass builds issue every instruction.
   4. One `bwd_cast` at the end (none on a direct binding).
-* Key-pass chunks.  Each item has its own FP32 `dq_partial` row (147,456 B),
-  so the token chunk is planned at two items per token: the largest multiple
-  of 128 tokens whose `2 x 147,456 + 4 * topk + 4` B per token fit the
-  640 MiB budget -- 2,176 tokens at top-k 2048 (4,224 at 64 heads).  The pass
-  count follows the record's rule as at 64 heads, with the head-window
-  overrides `cake_backend.HEAD_WINDOW_KEY_PASS_RULES` (`sm_103a` and
-  `sm_107a`: no tail-row passes; `head_window_key_passes_rule` says where they
-  apply: above 64 heads where the single-pass head-window main build ships).
-  On VR200 (`sm_107a`) the single pass of the head-window build is 10-12 %
-  faster than the record's two passes on the main-stage kernels at
-  `T = 16,380`, `S = 524,160` / `1,048,320` (96 and 128 heads, top-k 2048).
-  On GB300 the
-  single pass of the head-window build is 15-20 % faster than the record's
-  three passes on every tail row timed (top-k 2048, 96 and 128 heads:
-  `T = 16,380` with `S = 147,420` to `1,048,320`, `T = 8,448` and `4,352` with
-  `S = 131,072`; backward 39.5 / 40.5 ms against 45.6 / 46.8 ms at 96 heads
-  and `S = 524,160` / `1,048,320`); two or three forced passes over 2,176-,
-  4,352- or 16,380-token chunks stay 5-15 % slower than one at `S = 524,160` /
-  `1,048,320`.  A packed row of four documents plans one pass with or without
-  the override.  [est] The three passes keep each pass's FP32 dKV accumulator
-  slice (`S / 3 x 2,304` B) nearer the L2 budget; with head windows the extra
-  launches, the FP32 dQ-partial round trip and the compaction of every pass
-  cost more than that locality gains, also where the slice is close to the
-  100 MiB budget (113 MB at `S = 147,420`).  The two-window bridge and the
-  64-head plans keep the record's rule.
+* Key passes.  From 0.13.1 a head-window backward plans one key pass on every
+  row and architecture; `key_passes` still selects passes (the pass builds
+  `bwd_main_pass_hw` / `bwd_main_pass_natural_hw`).
+  `head_window_key_passes_rule` says where this holds: above 64 heads where
+  the single-pass head-window main build ships.  The record's rule was
+  measured on the 64-head program; with head windows it planned two to four
+  passes on the one-chunk rows (one segment, top-k 2048, `T <= 4,224`: two /
+  three / four passes from 65,536 / 131,072 / 163,840 keys on `sm_100a` and
+  `sm_103a`, two from 131,072 keys on `sm_107a`) and three (`sm_103a`) or two
+  (`sm_107a`) passes on the tail rows, which earlier releases already ran in
+  one pass.  One pass was faster on every multi-pass row timed (96 and 128 heads,
+  both packages, backward, training step and checkpointed recompute; medians
+  of same-round ratios): one-chunk rows on B200 (`T = 2,048`, `S = 131,072`,
+  three passes) 6-17 %, on GB300 (`T = 2,048` with `S = 65,536` / `131,072`,
+  `T = 1,024` with `S = 163,840`; two / three / four passes) 5-22 %, on VR200
+  (`T = 1,024` to `2,176` with `S = 131,072` to `1,048,320`, two passes)
+  5-11 %; tail rows on GB300 (`T = 16,380` with `S = 147,420` to `1,048,320`,
+  `T = 8,448` and `4,352` with `S = 131,072`; three passes) 15-20 % on the
+  backward, on VR200 (`T = 16,380`, `S = 524,160` / `1,048,320`, two passes)
+  10-12 % on the main-stage kernels.  The forward is unchanged.  [est] Every
+  pass repeats the compaction, the FP32 dQ-partial round trip of both
+  windows and the pipeline fill, which costs more than the L2 locality of a
+  pass's dK/dV accumulator slice gains.  One pass needs no pass scratch.  A
+  packed multi-segment row plans one pass as before.  The two-window bridge
+  and the 64-head plans keep the record's rule.
+* Key-pass chunks.  With `key_passes > 1` each item has its own FP32
+  `dq_partial` row (147,456 B), so the token chunk is planned at two items
+  per token: the largest multiple of 128 tokens whose
+  `2 x 147,456 + 4 * topk + 4` B per token fit the 640 MiB budget -- 2,176
+  tokens at top-k 2048 (4,224 at 64 heads).
 * Launches.  The forward is one launch; the single-pass backward is the
   optional `dout` copy, `bwd_delta`, one main launch and `bwd_cast`.  The
   runner's launch keys are the build names (`("fwd_hw",)` as
@@ -772,9 +775,9 @@ skipped by every store.
   `key_scratch` and `pass_counts` one row per token.
 * Numerics.  The builds give every head the same 32-row rescale groups as the
   bridge, so `out`, `lse`, `o_lo` and `dq` equal the bridge's bit for bit at
-  the same key-pass count (on the `sm_103a` tail rows the head-window plan runs
-  one pass where the bridge runs three, on the `sm_107a` tail rows one where
-  it runs two, and its `dq` sums the keys in the single pass's order);
+  the same key-pass count (where the bridge runs two to four passes, the
+  head-window plan runs one, and its `dq` sums the keys in the single pass's
+  order);
   dK / dV add the same terms through FP32 atomics in another order.  The
   single-pass forward is another kernel: its `out`, `lse` and `o_lo`, and the
   `dq` of a backward over them, are its own bits.
@@ -883,7 +886,7 @@ The bridge runs the 64-head stages on two 64-head windows, `W1` first and then
 * On `sm_107a` (from 0.12.0) the forward runs the single-pass forward and the
   backward the head-window main builds, with the `sm_107a` direct-accumulation
   rule and the single-pass descending token order of the 64-head plan and the
-  key-pass rule with the head-window override (no tail-row passes).  A phase
+  head-window key-pass rule (one pass unless `key_passes` selects more).  A phase
   whose build the registry does not ship for `sm_107a` runs the two-window
   bridge on the 64-head stages that ship there (the forward on `fwd_scan` /
   `fwd_scan_no_olo`) with the 64-head rules; the head-window forward never
