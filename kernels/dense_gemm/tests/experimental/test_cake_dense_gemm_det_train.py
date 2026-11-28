@@ -22227,10 +22227,32 @@ def _tables_0327(m):
 def _tables_0328(m):
     """Put the tables of version 0.3.28 back (``m``: a monkeypatch context; applying it again in a nested context
     changes nothing): no 152-SM sm_100a part rules (``SM100A_152_0329_KEYS``) and no router split count of
-    ``ROUTER_0329_RULES``.  Version 0.3.29 changes nothing else."""
+    ``ROUTER_0329_RULES``, on the tables of version 0.3.29 (``_tables_0329``).  Version 0.3.29 changes nothing
+    else."""
+    _tables_0329(m)
     m.delitem(cake_backend.ROW_RULES_BY_SM, ("sm_100a", 152), raising=False)
     for key in ROUTER_0329_RULES:
         m.delitem(cake_backend.ROUTER_SPLIT_RULES, key, raising=False)
+
+
+def _tables_0329(m):
+    """Put the tables of version 0.3.29 back (``m``: a monkeypatch context; applying it again in a nested context
+    changes nothing): in each part of ``NEW_KEYS_0330`` the rule of version 0.3.29 at a key the version changes
+    (``PRIOR_0330``) and no other key of the version, and no part of ``NEW_PARTS_0330``; a part or a changed key the
+    tables in place do not hold (an older version's tables, a nested application) stays absent.  Version 0.3.30
+    changes nothing else."""
+    for part, keys in NEW_KEYS_0330.items():
+        if part in NEW_PARTS_0330:
+            m.delitem(cake_backend.ROW_RULES_BY_SM, part, raising=False)
+            continue
+        table = cake_backend.ROW_RULES_BY_SM.get(part)
+        if table is None:
+            continue
+        for key in keys:
+            if (part, key) not in PRIOR_0330:
+                m.delitem(table, key, raising=False)
+            elif key in table:
+                m.setitem(table, key, PRIOR_0330[(part, key)])
 
 
 def _sm107a_0323_rule_at(key, sm_count, T):
@@ -27768,6 +27790,7 @@ def test_0329_part_table(monkeypatch):
     counts are the 13 of version 0.3.28 and the two of ``ROUTER_0329_RULES``, and ``_tables_0328`` (applied twice)
     gives back the tables of version 0.3.28.  The keys of ``ROWS_0329``, ``PLANS_0329`` and ``A0_PLANS_0329`` are the
     keys of the version (35 measured rows), and the 42 rows the version keeps are on its part."""
+    _tables_0329(monkeypatch)  # the tables of version 0.3.29: version 0.3.30 is checked below
     rules = cake_backend.ROW_RULES_BY_SM
     gb200 = ("sm_100a", 152)
     assert set(PARTS_0329) == set(NEW_KEYS_0329) == {gb200}
@@ -28220,3 +28243,545 @@ def test_gpu_0329_router_rows(key, monkeypatch, record_property):
     del v, first, eager
     cake_backend.cake_dense_gemm_det_train_convenience_cache_clear()
     torch.cuda.empty_cache()
+
+
+# ---------------------------------------------------------------------------
+# Version 0.3.30: exact keys added to (or changed in) the part rules of the screened device classes (no router change)
+# ---------------------------------------------------------------------------
+
+# The constants of the version, generated from the measurements and the planner (never typed by hand):
+# ``PARTS_0330`` (part -> the L2 size of its device class), ``NEW_KEYS_0330`` (part -> key -> rule of the version),
+# ``PRIOR_0330`` ((part, key) -> the rule of version 0.3.29 at a key the version changes), ``NEW_PARTS_0330`` (the parts
+# version 0.3.29 did not have), ``LEFT_OUT_0330`` (part -> measured keys the version leaves out), ``COUNTS_0330`` (part
+# -> keys, measured rows and kept rows), ``ROUTER_0330_ENTRIES`` (the router split counts, unchanged), ``PLANS_0330`` /
+# ``A0_PLANS_0330`` ((part, key) -> the plan fields ``PLAN_FIELDS_0330`` with the tables of the version and of version
+# 0.3.29), ``ROWS_0330`` ((part, key) -> the measured rows that plan the key: op, output dtype, T and view) and
+# ``ROWS_0330_KEEP`` (the measured rows whose plan the version keeps: part, op, output dtype, T and view).  A view is
+# ``("proj", d_in, d_out)`` or ``("mla", heads, d_in, d_out, head stride, weight layout)``.
+# fmt: off
+PARTS_0330 = {("sm_103a", 152): 135528448, ("sm_100a", 148): 132644864}
+NEW_KEYS_0330 = {
+    ("sm_103a", 152): {
+        ("sm_103a", False, False, False, False, False, 4096, 1536, 16380): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": True, "cta1": False, "cta_rows": 128,
+            "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": True, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 15, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
+            "stt": False, "sw": 0,
+        },
+        ("sm_103a", False, False, False, False, False, 18432, 1536, 16380): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": True, "cta1": False, "cta_rows": 128,
+            "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": True, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 15, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
+            "stt": False, "sw": 0,
+        },
+        ("sm_103a", False, True, False, False, False, 1024, 4096, 32736): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": True, "cta1": False, "cta_rows": 128,
+            "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": True, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 15, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
+            "stt": False, "sw": 0,
+        },
+        ("sm_103a", False, True, False, False, False, 1024, 4096, 32768): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": True, "cta1": False, "cta_rows": 128,
+            "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": True, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 15, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
+            "stt": False, "sw": 0,
+        },
+        ("sm_103a", False, True, False, False, False, 1536, 18432, 16380): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": True, "cta1": False, "cta_rows": 128,
+            "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": True, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 15, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
+            "stt": False, "sw": 0,
+        },
+        ("sm_103a", False, True, False, False, False, 3584, 7168, 16380): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": True, "cta1": False, "cta_rows": 256,
+            "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": True, "lw": False,
+            "mg": False, "ovl": False, "ovr": True, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
+            "stt": False, "sw": 0,
+        },
+        ("sm_103a", False, True, False, False, False, 7168, 3584, 16380): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": True, "cta1": False, "cta_rows": 128,
+            "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": True, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 15, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
+            "stt": False, "sw": 0,
+        },
+        ("sm_103a", False, True, False, False, False, 7168, 6144, 16380): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": True, "cta1": False, "cta_rows": 256,
+            "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": True, "lw": False,
+            "mg": False, "ovl": False, "ovr": True, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
+            "stt": False, "sw": 0,
+        },
+        ("sm_103a", True, True, True, False, False, 6144, 16380, 7168): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 256,
+            "epi": "tma", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": False, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 3, "sk_sync": True, "slots": 1, "store_ef": False,
+            "store_hint": "none", "stt": False, "sw": 0,
+        },
+        ("sm_103a", True, True, True, False, False, 7168, 16380, 6144): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": False, "cta1": False, "cta_rows": 256,
+            "epi": "tma", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": False, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 7, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 3, "sk_sync": True, "slots": 1, "store_ef": False,
+            "store_hint": "none", "stt": False, "sw": 0,
+        },
+    },
+    ("sm_100a", 148): {
+        ("sm_100a", False, True, False, False, False, 1024, 4096, 32736): {
+            "b_swz": 128, "batch_group": 0, "block_n": 256, "cgrp": True, "cta1": False, "cta_rows": 128,
+            "epi": "reg", "f32_v8": False, "form": "", "hints": ("none", "none"), "htail": True, "lw": False,
+            "mg": False, "ovl": False, "ovr": False, "park": False, "pd": 0, "pf": 0, "pro": 15, "quad_store": False,
+            "sh": 0, "sk_first": False, "sk_slab": 0, "sk_sync": False, "store_ef": False, "store_hint": "none",
+            "stt": False, "sw": 0,
+        },
+    },
+}
+PRIOR_0330 = {
+}
+NEW_PARTS_0330 = ()
+LEFT_OUT_0330 = {
+}
+COUNTS_0330 = {("sm_103a", 152): (10, 10, 18), ("sm_100a", 148): (1, 1, 35)}
+ROUTER_0330_ENTRIES = 15
+PLAN_FIELDS_0330 = ("template", "num_full", "tail_tiles", "sk_units", "iters_per_unit", "sk_exact", "sk_sync", "htail_plan", "group_m", "promote_blocks")
+PLANS_0330 = {
+    (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 4096, 1536, 16380)): ("dense_proj_det_gemm_kk_n256_ht_cg_pro15", 988, 36, 72, 24, 0, False, True, 16, 0),
+    (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 18432, 1536, 16380)): ("dense_proj_det_gemm_kk_n256_ht_cg_pro15", 4608, 0, 0, 24, 0, False, False, 16, 0),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 1024, 4096, 32736)): ("dense_proj_det_gemm_kn_n256_ht_cg_pro15", 512, 0, 0, 64, 0, False, False, 16, 0),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 1024, 4096, 32768)): ("dense_proj_det_gemm_kn_n256_ht_cg_pro15", 512, 0, 0, 64, 0, False, False, 16, 0),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 1536, 18432, 16380)): ("dense_proj_det_gemm_kn_n256_ht_cg_pro15", 380, 4, 8, 288, 0, False, True, 16, 0),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 3584, 7168, 16380)): ("dense_proj_det_gemm_kn_n256_m256_ht_cg_or_pro7", 448, 0, 0, 112, 0, False, False, 16, 0),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 7168, 3584, 16380)): ("dense_proj_det_gemm_kn_n256_ht_cg_pro15", 1792, 0, 0, 56, 0, False, False, 16, 0),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 7168, 6144, 16380)): ("dense_proj_det_gemm_kn_n256_m256_ht_cg_or_pro7", 896, 0, 0, 96, 0, False, False, 16, 0),
+    (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 6144, 16380, 7168)): ("dense_proj_det_gemm_nn_n256_m256_f32_tma1_sks_sb3_pro7", 304, 32, 64, 128, 0, True, False, 16, 0),
+    (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 7168, 16380, 6144)): ("dense_proj_det_gemm_nn_n256_m256_f32_tma1_sks_sb3_pro7", 304, 32, 64, 128, 0, True, False, 16, 0),
+    (("sm_100a", 148), ("sm_100a", False, True, False, False, False, 1024, 4096, 32736)): ("dense_proj_det_gemm_kn_n256_ht_cg_pro15", 512, 0, 0, 64, 0, False, False, 16, 0),
+}
+A0_PLANS_0330 = {
+    (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 4096, 1536, 16380)): ("dense_proj_det_gemm_kk_n256_pro7", 1024, 0, 0, 24, 0, False, False, 16, 0),
+    (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 18432, 1536, 16380)): ("dense_proj_det_gemm_kk_n256_pro7", 4608, 0, 0, 24, 0, False, False, 16, 0),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 1024, 4096, 32736)): ("dense_proj_det_gemm_kn_n256_pro7", 512, 0, 0, 64, 0, False, False, 16, 0),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 1024, 4096, 32768)): ("dense_proj_det_gemm_kn_n256_pro7", 512, 0, 0, 64, 0, False, False, 16, 0),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 1536, 18432, 16380)): ("dense_proj_det_gemm_kn_n256_pro7", 384, 0, 0, 288, 0, False, False, 16, 0),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 3584, 7168, 16380)): ("dense_proj_det_gemm_kn_n256_pro7", 896, 0, 0, 112, 0, False, False, 16, 0),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 7168, 3584, 16380)): ("dense_proj_det_gemm_kn_n256_pro7", 1792, 0, 0, 56, 0, False, False, 16, 0),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 7168, 6144, 16380)): ("dense_proj_det_gemm_kn_n256_pro7", 1792, 0, 0, 96, 0, False, False, 16, 0),
+    (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 6144, 16380, 7168)): ("dense_proj_det_gemm_nn_n256_m256_f32_tma1_pro7", 336, 0, 0, 256, 0, False, False, 16, 0),
+    (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 7168, 16380, 6144)): ("dense_proj_det_gemm_nn_n256_m256_f32_tma1_pro7", 336, 0, 0, 256, 0, False, False, 16, 0),
+    (("sm_100a", 148), ("sm_100a", False, True, False, False, False, 1024, 4096, 32736)): ("dense_proj_det_gemm_kn_n256_pro7", 512, 0, 0, 64, 0, False, False, 16, 0),
+}
+ROWS_0330 = {
+    (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 4096, 1536, 16380)): (("fwd", "bf16", 16380, ("proj", 1536, 4096)),),
+    (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 18432, 1536, 16380)): (("fwd", "bf16", 16380, ("proj", 1536, 18432)),),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 1024, 4096, 32736)): (("dgrad", "bf16", 32736, ("proj", 1024, 4096)),),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 1024, 4096, 32768)): (("dgrad", "bf16", 32768, ("proj", 1024, 4096)),),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 1536, 18432, 16380)): (("dgrad", "bf16", 16380, ("proj", 1536, 18432)),),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 3584, 7168, 16380)): (("dgrad", "bf16", 16380, ("proj", 3584, 7168)),),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 7168, 3584, 16380)): (("dgrad", "bf16", 16380, ("proj", 7168, 3584)),),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 7168, 6144, 16380)): (("dgrad", "bf16", 16380, ("proj", 7168, 6144)),),
+    (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 6144, 16380, 7168)): (("wgrad", "f32", 16380, ("proj", 6144, 7168)),),
+    (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 7168, 16380, 6144)): (("wgrad", "f32", 16380, ("proj", 7168, 6144)),),
+    (("sm_100a", 148), ("sm_100a", False, True, False, False, False, 1024, 4096, 32736)): (("dgrad", "bf16", 32736, ("proj", 1024, 4096)),),
+}
+ROWS_0330_KEEP = (
+    (("sm_103a", 152), "fwd", "bf16", 16380, ("proj", 12288, 7168)),
+    (("sm_103a", 152), "fwd", "bf16", 16380, ("proj", 33792, 7168)),
+    (("sm_103a", 152), "fwd", "bf16", 16380, ("proj", 6144, 7168)),
+    (("sm_103a", 152), "dgrad", "bf16", 16380, ("proj", 7168, 12288)),
+    (("sm_103a", 152), "wgrad", "bf16", 16380, ("proj", 7168, 12288)),
+    (("sm_103a", 152), "wgrad", "f32", 16380, ("proj", 7168, 12288)),
+    (("sm_103a", 152), "dgrad", "bf16", 16380, ("proj", 7168, 1536)),
+    (("sm_103a", 152), "dgrad", "bf16", 16380, ("proj", 7168, 33792)),
+    (("sm_103a", 152), "wgrad", "f32", 32768, ("proj", 4096, 1024)),
+    (("sm_103a", 152), "wgrad", "f32", 32736, ("proj", 4096, 1024)),
+    (("sm_103a", 152), "wgrad", "bf16", 32768, ("proj", 4096, 12288)),
+    (("sm_103a", 152), "wgrad", "f32", 32768, ("proj", 4096, 12288)),
+    (("sm_103a", 152), "wgrad", "bf16", 32736, ("proj", 4096, 12288)),
+    (("sm_103a", 152), "wgrad", "f32", 32736, ("proj", 4096, 12288)),
+    (("sm_103a", 152), "dgrad", "bf16", 32736, ("proj", 8192, 4096)),
+    (("sm_103a", 152), "fwd", "bf16", 32736, ("proj", 4096, 8192)),
+    (("sm_103a", 152), "fwd", "bf16", 32768, ("proj", 4096, 8192)),
+    (("sm_103a", 152), "dgrad", "bf16", 32768, ("proj", 8192, 4096)),
+    (("sm_100a", 148), "dgrad", "bf16", 16380, ("proj", 1536, 18432)),
+    (("sm_100a", 148), "fwd", "bf16", 16380, ("proj", 1536, 18432)),
+    (("sm_100a", 148), "dgrad", "bf16", 16380, ("proj", 3584, 7168)),
+    (("sm_100a", 148), "fwd", "bf16", 16380, ("proj", 3584, 7168)),
+    (("sm_100a", 148), "wgrad", "f32", 16380, ("proj", 3584, 7168)),
+    (("sm_100a", 148), "dgrad", "bf16", 16380, ("proj", 6144, 7168)),
+    (("sm_100a", 148), "fwd", "bf16", 16380, ("proj", 6144, 7168)),
+    (("sm_100a", 148), "wgrad", "bf16", 16380, ("proj", 6144, 7168)),
+    (("sm_100a", 148), "dgrad", "bf16", 16380, ("proj", 7168, 3584)),
+    (("sm_100a", 148), "dgrad", "bf16", 16380, ("proj", 7168, 6144)),
+    (("sm_100a", 148), "fwd", "bf16", 16380, ("proj", 7168, 6144)),
+    (("sm_100a", 148), "wgrad", "bf16", 16380, ("proj", 7168, 6144)),
+    (("sm_100a", 148), "dgrad", "bf16", 32768, ("proj", 4096, 1024)),
+    (("sm_100a", 148), "wgrad", "f32", 32768, ("proj", 4096, 1024)),
+    (("sm_100a", 148), "wgrad", "f32", 32736, ("proj", 4096, 1024)),
+    (("sm_100a", 148), "wgrad", "bf16", 32768, ("proj", 4096, 12288)),
+    (("sm_100a", 148), "wgrad", "f32", 32768, ("proj", 4096, 12288)),
+    (("sm_100a", 148), "wgrad", "bf16", 32736, ("proj", 4096, 12288)),
+    (("sm_100a", 148), "wgrad", "f32", 32736, ("proj", 4096, 12288)),
+    (("sm_100a", 148), "dgrad", "bf16", 32768, ("proj", 4096, 512)),
+    (("sm_100a", 148), "dgrad", "bf16", 32736, ("proj", 4096, 512)),
+    (("sm_100a", 148), "wgrad", "bf16", 32768, ("proj", 4096, 8192)),
+    (("sm_100a", 148), "wgrad", "f32", 32768, ("proj", 4096, 8192)),
+    (("sm_100a", 148), "wgrad", "bf16", 32736, ("proj", 4096, 8192)),
+    (("sm_100a", 148), "wgrad", "f32", 32736, ("proj", 4096, 8192)),
+    (("sm_100a", 148), "dgrad", "bf16", 32768, ("proj", 8192, 4096)),
+    (("sm_100a", 148), "wgrad", "bf16", 32768, ("proj", 8192, 4096)),
+    (("sm_100a", 148), "wgrad", "f32", 32768, ("proj", 8192, 4096)),
+    (("sm_100a", 148), "dgrad", "bf16", 32736, ("proj", 8192, 4096)),
+    (("sm_100a", 148), "wgrad", "bf16", 32736, ("proj", 8192, 4096)),
+    (("sm_100a", 148), "wgrad", "f32", 32736, ("proj", 8192, 4096)),
+    (("sm_100a", 148), "fwd", "bf16", 16380, ("proj", 1536, 4096)),
+    (("sm_100a", 148), "dgrad", "bf16", 16380, ("proj", 7168, 1536)),
+    (("sm_100a", 148), "dgrad", "bf16", 32768, ("proj", 1024, 4096)),
+    (("sm_100a", 148), "dgrad", "bf16", 32736, ("proj", 4096, 1024)),
+)
+# fmt: on
+
+#: The parts of the routing checks of the version: the parts with keys and the device classes beside them.
+PARTS_0330_SWEEP = (
+    ("sm_100a", 148),
+    ("sm_100a", 152),
+    ("sm_103a", 148),
+    ("sm_103a", 152),
+    ("sm_103a", 160),
+    ("sm_107a", 212),
+    ("sm_107a", 216),
+)
+
+
+def _plan_0330(arch, sm_count, op, out_dtype, T, view, call="entry", heads=None):
+    """The planner's plan (with the registry fallback) of a measured row (:func:`_operands_0328`) on a part of
+    ``sm_count`` SMs of ``arch``, with the L2 size of its class (``PARTS_0330``, else ``PARTS_0329``, else
+    ``PARTS_0328``, else ``L2_BYTES``); CPU views, nothing launched."""
+    A, B, out, transposed, _ = _operands_0328(arch, op, out_dtype, T, view, _empty_0328, call, heads)
+    part = (arch, sm_count)
+    return cake_dense_gemm_det_train_projection_plan(
+        A,
+        B,
+        out,
+        sm_count=sm_count,
+        l2_bytes=PARTS_0330.get(part, PARTS_0329.get(part, PARTS_0328.get(part, L2_BYTES))),
+        transposed_out=transposed,
+        arch=arch,
+    )[0]
+
+
+def test_0330_part_tables(monkeypatch):
+    """The part rules of the version: each part of ``NEW_KEYS_0330`` holds its keys of version 0.3.29 (the same rules
+    with the same types, but at a changed key of ``PRIOR_0330``) and its keys of the version, each rule equal to the
+    generated literal with the same types at every level, every rule field a keyword of the planner; a part of
+    ``NEW_PARTS_0330`` holds exactly its keys of the version.  No other part changes, the router split counts are the
+    ``ROUTER_0330_ENTRIES`` of version 0.3.29, a key of ``LEFT_OUT_0330`` keeps its rule of version 0.3.29, and
+    ``_tables_0329`` (applied twice) gives back the tables of version 0.3.29.  The keys of ``ROWS_0330``,
+    ``PLANS_0330`` and ``A0_PLANS_0330`` are the keys of the version, with the counts of ``COUNTS_0330``."""
+    rules = cake_backend.ROW_RULES_BY_SM
+    assert set(PARTS_0330) == set(NEW_KEYS_0330) == set(COUNTS_0330)
+    assert set(NEW_PARTS_0330) <= set(NEW_KEYS_0330)
+    with monkeypatch.context() as m:
+        _tables_0329(m)
+        before = {part: dict(table) for part, table in rules.items()}
+        router_before = dict(ROUTER_SPLIT_RULES)
+        _tables_0329(m)
+        assert {part: dict(table) for part, table in rules.items()} == before
+        assert dict(ROUTER_SPLIT_RULES) == router_before
+    assert dict(ROUTER_SPLIT_RULES) == router_before and len(router_before) == ROUTER_0330_ENTRIES
+    assert set(rules) == {*before, *NEW_PARTS_0330} and not set(NEW_PARTS_0330) & set(before)
+    keywords = set(inspect.signature(cake_dense_gemm_det_train_projection_plan).parameters) - {"A", "B", "out"}
+    for part, table in before.items():
+        keys = NEW_KEYS_0330.get(part, {})
+        assert set(rules[part]) == {*table, *keys}, part
+        for key, rule in table.items():
+            if key not in keys:
+                assert _same_typed_0328(rules[part][key], rule), (part, key)
+        for key in keys:
+            if (part, key) in PRIOR_0330:
+                assert _same_typed_0328(table[key], PRIOR_0330[(part, key)]), (part, key)
+            else:
+                assert key not in table, (part, key)
+    for part, keys in NEW_KEYS_0330.items():
+        if part in NEW_PARTS_0330:
+            assert set(rules[part]) == set(keys), part
+        for key, rule in keys.items():
+            assert len(key) == 9 and key[0] == part[0], (part, key)
+            assert _same_typed_0328(rules[part][key], rule), (part, key)
+            assert set(rule) <= keywords, (part, key, sorted(set(rule) - keywords))
+    for part, keys in LEFT_OUT_0330.items():
+        for key in keys:
+            assert key not in NEW_KEYS_0330.get(part, {}), (part, key)
+            assert rules.get(part, {}).get(key) == before.get(part, {}).get(key), (part, key)
+    new = {(part, key) for part, keys in NEW_KEYS_0330.items() for key in keys}
+    assert set(ROWS_0330) == set(PLANS_0330) == set(A0_PLANS_0330) == new
+    for part, (n_keys, n_rows, n_keep) in COUNTS_0330.items():
+        assert len(NEW_KEYS_0330[part]) == n_keys, part
+        assert sum(len(rows) for (p, _key), rows in ROWS_0330.items() if p == part) == n_rows, part
+        assert sum(1 for row in ROWS_0330_KEEP if row[0] == part) == n_keep, part
+    assert {row[0] for row in ROWS_0330_KEEP} <= set(PARTS_0330)
+    assert PLAN_FIELDS_0330 == PLAN_FIELDS_0328
+
+
+@pytest.mark.parametrize("part", sorted(PARTS_0330), ids=lambda part: f"{part[0]}-{part[1]}")
+def test_0330_keys_plan_the_screened_program(part, monkeypatch):
+    """Each measured row of ``ROWS_0330`` on its part (CPU views, the part's SM count and the L2 size of its class)
+    reads its key and plans ``PLANS_0330``: the program (one this checkout registers for the architecture), the tail
+    form, the stream-K fields, the raster group and the promoted chunk, without a rule, knob, swap or wave fallback.
+    With the tables of version 0.3.29 (``_tables_0329``) it reads the same key and plans ``A0_PLANS_0330``.  The rows of
+    the batched (MLA) keys also plan the program of the version at 64 and 128 heads, without a fallback."""
+    arch, sm_count = part
+    planned = 0
+    for (row_part, key), rows in ROWS_0330.items():
+        if row_part != part:
+            continue
+        for op, out_dtype, T, view in rows:
+            where = (part, key, op, out_dtype, T, view)
+            plan = _plan_0330(arch, sm_count, op, out_dtype, T, view)
+            assert _key_0328(plan, arch) == key, (where, _key_0328(plan, arch))
+            assert _plan_tuple_0328(plan) == PLANS_0330[(part, key)], (where, _plan_tuple_0328(plan))
+            assert not _fallbacks_0328(plan), (where, _fallbacks_0328(plan))
+            assert plan.template in cake_jit.KERNELS.get(arch, {}), (where, plan.template)
+            with monkeypatch.context() as m:
+                _tables_0329(m)
+                before = _plan_0330(arch, sm_count, op, out_dtype, T, view)
+            assert _key_0328(before, arch) == key, where
+            assert _plan_tuple_0328(before) == A0_PLANS_0330[(part, key)], (where, _plan_tuple_0328(before))
+            planned += 1
+            if view[0] != "mla":
+                continue
+            for heads in (64, 128):
+                other = _plan_0330(arch, sm_count, op, out_dtype, T, view, heads=heads)
+                assert _key_0328(other, arch) == key, (where, heads)
+                assert other.template == PLANS_0330[(part, key)][0], (where, heads, other.template)
+                assert not _fallbacks_0328(other), (where, heads, _fallbacks_0328(other))
+    assert planned == COUNTS_0330[part][1], planned
+
+
+def test_0330_exact_keys_only(monkeypatch):
+    """``_measured_row_rule`` of the row of every key of the version at its token count, one token below and above it,
+    and at 16380, 16384, 32736 and 32768 tokens, on every part of ``PARTS_0330_SWEEP`` and without an SM count (sm_100a,
+    sm_103a and sm_107a): the rule differs from the rule with the tables of version 0.3.29 (``_tables_0329``) exactly at
+    the keys of the version on their parts, and there it is the generated rule (the same types at every level).  Every
+    key of the version is reached."""
+    tails = sorted({key[1:] for keys in NEW_KEYS_0330.values() for key in keys})
+    parts = (*PARTS_0330_SWEEP, *((arch, None) for arch in ("sm_100a", "sm_103a", "sm_107a")))
+    cells = []
+    for tail in tails:
+        slot = _token_slot_0328(("",) + tail) - 1
+        for T in (tail[slot] - 1, tail[slot], tail[slot] + 1, 16380, 16384, 32736, 32768):
+            row = tail[:slot] + (T,) + tail[slot + 1 :]
+            cells += [(arch, sm_count, row) for arch, sm_count in parts]
+    cells = list(dict.fromkeys(cells))
+
+    def rules_of():
+        return {
+            (arch, sm_count, row): cake_backend._measured_row_rule(arch, *row, sm_count=sm_count)
+            for arch, sm_count, row in cells
+        }
+
+    now = rules_of()
+    with monkeypatch.context() as m:
+        _tables_0329(m)
+        before = rules_of()
+    reached = set()
+    for cell in cells:
+        arch, sm_count, row = cell
+        rule = NEW_KEYS_0330.get((arch, sm_count), {}).get((arch, *row))
+        if rule is None:
+            assert now[cell] == before[cell], (cell, now[cell], before[cell])
+            continue
+        assert _same_typed_0328(now[cell], rule), (cell, now[cell])
+        assert now[cell] != before[cell], cell
+        reached.add(((arch, sm_count), (arch, *row)))
+    assert reached == {(part, key) for part, keys in NEW_KEYS_0330.items() for key in keys}
+    print(f"ROW_RULES_0330: {len(cells)} cells, {len(reached)} keyed")
+
+
+def test_routing_0330_changes_exactly_the_new_keys(monkeypatch):
+    """Byte for byte against the tables of version 0.3.29 (``_tables_0329``), over the rows of ``ROWS_0330`` and
+    ``ROWS_0330_KEEP``, of ``ROWS_0329`` / ``ROWS_0329_KEEP`` and of ``ROWS_0328`` / ``ROWS_0328_KEEP`` at their token
+    count, one token below and above it and at 16172, 16231, 16384, 32736 and 32768 tokens, and over
+    ``ROUTING_038_SWEEP``, on every part of ``PARTS_0330_SWEEP`` (the call of the row and, for a projection's weight
+    gradient, also the unbatched generic call ``G.T @ X``): the key a call reads never changes, and a plan changes
+    exactly where it reads a key of the version on its part, to the plan of ``PLANS_0330``.  Every key of the version
+    changes at its rows.  At a key of the swapped form (transposed store, unbatched) ``_single_wgrad_swap`` is false and
+    the generic call keeps its direct plan of version 0.3.29; at every other key of a projection's weight gradient the
+    generic call reads the same key and changes with the entry.  The count of the changed cells is printed."""
+    rows = {}
+    near = (16172, 16231, 16384, 32736, 32768)
+    for measured in (*ROWS_0330.values(), *ROWS_0329.values(), *ROWS_0328.values()):
+        for op, out_dtype, T, view in measured:
+            rows.setdefault((op, out_dtype, view), set()).update((T - 1, T, T + 1, *near))
+    for _part, op, out_dtype, T, view in (*ROWS_0330_KEEP, *ROWS_0329_KEEP, *ROWS_0328_KEEP):
+        rows.setdefault((op, out_dtype, view), set()).update((T - 1, T, T + 1, *near))
+    for op, d_in, d_out, out_dtype, token_counts in ROUTING_038_SWEEP:
+        rows.setdefault((op, out_dtype, ("proj", d_in, d_out)), set()).update(token_counts)
+    cells = []
+    for (op, out_dtype, view), token_counts in rows.items():
+        calls = ("entry", "generic") if (op, view[0]) == ("wgrad", "proj") else ("entry",)
+        for T in sorted(token_counts):
+            for arch, sm_count in PARTS_0330_SWEEP:
+                cells += [(call, op, out_dtype, view, T, arch, sm_count) for call in calls]
+
+    def plans():
+        return {
+            cell: _plan_0330(cell[5], cell[6], cell[1], cell[2], cell[4], cell[3], call=cell[0]) for cell in cells
+        }
+
+    now = plans()
+    with monkeypatch.context() as m:
+        _tables_0329(m)
+        before = plans()
+    changed = {}
+    for cell in cells:
+        call, op, out_dtype, view, T, arch, sm_count = cell
+        plan, old = now[cell], before[cell]
+        key = _key_0328(old, arch)
+        assert _key_0328(plan, arch) == key, (cell, _key_0328(plan, arch), key)
+        if key not in NEW_KEYS_0330.get((arch, sm_count), {}):
+            assert _plan_signature(plan) == _plan_signature(old), (cell, plan.template, old.template)
+            continue
+        assert _plan_tuple_0328(plan) == PLANS_0330[((arch, sm_count), key)], (cell, _plan_tuple_0328(plan))
+        assert _plan_signature(plan) != _plan_signature(old), cell
+        changed.setdefault(((arch, sm_count), key), set()).add(call)
+    assert set(changed) == set(ROWS_0330), sorted(set(ROWS_0330) - set(changed))
+    swapped = [(part, key) for part, key in ROWS_0330 if key[4] and not key[5]]
+    for part, key in swapped:
+        assert changed[(part, key)] == {"entry"}, (part, key)
+        for op, out_dtype, T, view in ROWS_0330[(part, key)]:
+            _, d_in, d_out = view
+            assert (op, view[0]) == ("wgrad", "proj"), (part, key)
+            assert not cake_backend._single_wgrad_swap(
+                part[0], d_out, d_in, T, True, True, out_dtype == "f32", sm_count=part[1]
+            ), (part, key)
+            cell = ("generic", op, out_dtype, view, T, *part)
+            assert now[cell] == before[cell] and not now[cell].transposed_out, (part, key, now[cell].template)
+    for (part, key), measured in ROWS_0330.items():
+        if (part, key) in swapped or not any((op, view[0]) == ("wgrad", "proj") for op, _d, _T, view in measured):
+            continue
+        assert changed[(part, key)] == {"entry", "generic"}, (part, key, changed[(part, key)])
+    print(
+        f"ROUTING_0330: {len(cells)} cells, {sum(len(c) for c in changed.values())} changed calls over {len(changed)} "
+        f"keys ({len(swapped)} swapped)"
+    )
+
+
+#: The cases of the GPU check of the version: every measured row of ``ROWS_0330``, each run on its part.
+CASES_0330 = tuple(
+    (part, key, op, out_dtype, T, view) for (part, key), rows in ROWS_0330.items() for op, out_dtype, T, view in rows
+)
+
+
+@pytest.mark.parametrize("case", CASES_0330, ids=_case_id_0328)
+def test_gpu_0330_part_keys_meet_the_naive_tier_and_repeat_bitwise(case, monkeypatch, record_property):
+    """Each case of ``CASES_0330`` on its part (another device skips): the prepared launch of the row's call (the
+    projection's forward, input gradient or weight-gradient entry; the MLA row's batched views) reads the key and plans
+    ``PLANS_0330`` on a program this device registers, without a fallback, where the tables of version 0.3.29
+    (``_tables_0329``) plan another plan of the same key.  Its output is judged against the FP64 oracle beside the
+    naive BF16 tier over the draws, and three more launches into NaN return the same bits; the eager entry plans the
+    same plan and returns the same bits; the columns of an input gradient's buffer past ``d_in`` stay NaN.  The
+    unbatched generic call ``G.T @ X`` of a projection's weight gradient plans the same plan and returns the same bits
+    where it reads the same key, else the plan of version 0.3.29."""
+    part, key, op, out_dtype, T, view = case
+    if not _device_supported():
+        pytest.skip(
+            f"requires a device with a registered generated instance (compute capability {_registered_capabilities()})"
+        )
+    device = torch.device("cuda")
+    arch, sm_count = arch_for(device), _sm_count()
+    if (arch, sm_count) != part:
+        pytest.skip(
+            f"a case of the {part[1]}-SM {part[0]} part alone, where version 0.3.30 keys the row; this device is "
+            f"{arch} with {sm_count} SMs"
+        )
+    bits = torch.int32 if out_dtype == "f32" else torch.int16
+    proj_wgrad = (op, view[0]) == ("wgrad", "proj")
+    cake_backend.cake_dense_gemm_det_train_convenience_cache_clear()
+
+    def make(shape, dtype):
+        return torch.empty(shape, dtype=dtype, device=device)
+
+    A, B, out, transposed, buffers = _operands_0328(arch, op, out_dtype, T, view, make)
+    _draw_0328(buffers, op, view, T, SEED)
+    if proj_wgrad:
+        prepared = cake_dense_gemm_det_train_projection_wgrad_prepare(buffers["G"], buffers["X"], out)
+    else:
+        prepared = cake_dense_gemm_det_train_projection_prepare(A, B, out)
+    plan = prepared.plan
+    where = (part, key, op, out_dtype, T, view, prepared.template)
+    assert _key_0328(plan, arch) == key, where
+    assert _plan_tuple_0328(plan) == PLANS_0330[(part, key)], (where, _plan_tuple_0328(plan))
+    assert not _fallbacks_0328(plan), (where, _fallbacks_0328(plan))
+    assert generated_program_available(device, prepared.template), where
+    kw = dict(sm_count=sm_count, l2_bytes=_l2_bytes(), transposed_out=transposed, arch=arch)
+    with monkeypatch.context() as m:
+        _tables_0329(m)
+        before = cake_dense_gemm_det_train_projection_plan(A, B, out, **kw)[0]
+    assert _key_0328(before, arch) == key, (where, before.template)
+    assert _plan_signature(before) != _plan_signature(plan), (where, before.template)
+    ref = (buffers["G"].t(), buffers["X"]) if proj_wgrad else (A, B)
+    rest = buffers["out"][..., view[2] :] if (op, view[0]) == ("dgrad", "mla") else None
+
+    def draw(s):
+        # the draw's operands, written into the tensors the prepared launch is bound to
+        _draw_0328(buffers, op, view, T, s)
+        return SimpleNamespace(A=ref[0], B=ref[1])
+
+    def launch(_inputs):
+        prepared.launch()
+        torch.cuda.synchronize()
+        return {"out": out}
+
+    def product(v, dtype):
+        return {"out": torch.matmul(v.A.to(dtype), v.B.to(dtype))}
+
+    judge_gemm(record_property, seed=SEED, draw=draw, launch=launch, product=product)
+    first = out.clone()
+    for _ in range(3):
+        nan_fill([buffers["out"]])
+        prepared.launch()
+        torch.cuda.synchronize()
+        assert torch.equal(out.view(bits), first.view(bits)), where
+        assert rest is None or bool(rest.isnan().all()), where
+    cake_backend.cake_dense_gemm_det_train_convenience_cache_clear()
+    nan_fill([buffers["out"]])
+    if proj_wgrad:
+        cake_backend.cake_dense_gemm_det_train_projection_wgrad(buffers["G"], buffers["X"], out)
+    elif view[0] == "proj" and op == "fwd":
+        cake_backend.cake_dense_gemm_det_train_projection_forward(buffers["X"], buffers["W"], out)
+    elif view[0] == "proj":
+        cake_backend.cake_dense_gemm_det_train_projection_dgrad(buffers["G"], buffers["W"], out)
+    else:
+        cake_backend.cake_dense_gemm_det_train_projection(A, B, out)
+    torch.cuda.synchronize()
+    assert [entry.plan for entry in cake_backend._K1_CACHE.values()] == [plan], where
+    assert torch.equal(out.view(bits), first.view(bits)), where
+    assert rest is None or bool(rest.isnan().all()), where
+    generic_note = "none"
+    if proj_wgrad:
+        G, X = buffers["G"], buffers["X"]
+        generic_out = torch.full_like(out, float("nan"))
+        generic = cake_dense_gemm_det_train_projection_prepare(G.t(), X, generic_out)
+        if _key_0328(generic.plan, arch) == key:
+            assert generic.plan == plan and generic.template == prepared.template, (where, generic.template)
+            generic.launch()
+            torch.cuda.synchronize()
+            differing = int((generic_out.view(bits) != first.view(bits)).sum())
+            assert differing == 0, (where, differing)
+            generic_note = "same key"
+        else:
+            kw = dict(sm_count=sm_count, l2_bytes=_l2_bytes(), arch=arch)
+            with monkeypatch.context() as m:
+                _tables_0329(m)
+                old = cake_dense_gemm_det_train_projection_plan(G.t(), X, generic_out, **kw)[0]
+            assert generic.plan == old, (where, generic.template, old.template)
+            generic_note = "kept"
+    print(f"ROWS_0330 {_case_id_0328(case)}: {prepared.template}, generic {generic_note}")
+    cake_backend.cake_dense_gemm_det_train_convenience_cache_clear()

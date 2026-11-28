@@ -150,8 +150,8 @@ limitations under the License.
 #   ``2 T``), the redo the persistent :func:`redo_launch_grid` over the ``2 T`` items.  A (token, key) pair adds one
 #   contribution per window and the builds skip the counter below half the 64-head threshold, so the overflow
 #   counters certify the int32 range as at 64 heads.  A key-range-pass backward compacts every token's keys per
-#   pass as at 64 heads (token space) and keeps one dQ partial block (36,864 FP32) per item, ``2 T`` blocks; its
-#   token chunk counts ``HEAD_WINDOW_ITEMS`` blocks per token (:func:`plan_key_passes`).
+#   pass as at 64 heads (token space) and keeps one dQ partial block (36,864 FP32) per item, ``2 T`` blocks; the
+#   policy plans one pass above 64 heads, so only ``key_passes`` runs it (:func:`plan_key_passes`).
 # * The key norms, the row bound and its grid (over ``T * topk`` pair slots: the pack27 rule reads ``T``), the redo
 #   preparation, the fold and the compaction run unchanged over the ``T`` tokens.
 #
@@ -297,8 +297,16 @@ def _check_key_passes(key_passes: Optional[int], num_kv: int) -> None:
 # the NoPE record's never plans a second pass), with one difference: every pass runs all T tokens in one launch
 # (``token_base = 0``), so a row the policy would run in several token chunks (T above
 # :meth:`KeyPassPolicy.token_chunk`) takes one pass.  ``key_passes`` overrides it.  A backward over more than 64
-# heads keeps one dQ partial block per (token, window) item, ``HEAD_WINDOW_ITEMS`` per token: its token chunk is the
-# chunk of that many blocks per token (2176 tokens at top-k 2048, 4224 at 64 heads).
+# heads plans one pass, as the non-deterministic package's head-window backward; ``key_passes`` still selects the
+# pass build ``bwd_main_pass_hw`` there, which keeps one dQ partial block per (token, window) item,
+# ``HEAD_WINDOW_ITEMS`` per token.  Before 0.13.1 the record's rule (measured on the 64-head program) planned two to
+# four passes there on the rows of one token chunk of two dQ partial blocks per token (T <= 2176 at top-k 2048): on
+# sm_100a and sm_103a the formula's two to four passes from 45,512 to 182,044 keys (two / three / four at 65,536 /
+# 131,072 / 163,840 keys), on sm_107a two from 131,072 keys.  One pass was faster on every such row timed (96 and 128
+# heads; backward, training step and checkpointed recompute; medians of same-round ratios): B200 (T = 2,048,
+# S = 131,072; three passes) 6-12 %, GB300 (T = 2,048 with S = 65,536 / 131,072 and T = 1,024 with S = 163,840; two /
+# three / four passes) 5-19 %, VR200 (T = 1,024 to 2,176 with S = 131,072 to 1,048,320; two passes) 5-10 %.  One pass
+# also needs no pass scratch.
 # one FP32 dQ / dQ_rope partial row (147,456 B)
 DQ_PARTIAL_BYTES_PER_TOKEN = NUM_HEADS * D_QK * 4
 # The NoPE program carries no rope part: one FP32 dQ partial row is 64 x 512 x 4 B (131,072 B); its record states the
@@ -390,8 +398,10 @@ class KeyPassPolicy:
 
     def token_chunk(self, topk: int, items_per_token: int = 1) -> int:
         """Tokens whose pass scratch (dQ partial, key scratch, pass count) fits the workspace budget.
-        ``items_per_token`` is the main stage's work items per token, each with its own dQ partial block: 1, or
-        ``HEAD_WINDOW_ITEMS`` (2) above 64 heads (the key scratch and the count stay one per token)."""
+        ``items_per_token`` counts the dQ partial blocks per token (the key scratch and the count stay one per
+        token).  This package reads the chunk with 1 only: a backward above 64 heads plans one pass
+        (:func:`plan_key_passes`) and a forced pass runs all tokens in one launch.  The parameter keeps the
+        non-deterministic package's signature."""
         per_token = (
             int(items_per_token) * self.dq_partial_bytes_per_token + 4 * int(topk) + 4
         )
@@ -448,10 +458,10 @@ def plan_key_passes(
 ) -> int:
     """Key-range passes of one backward of ``program``.  ``key_passes`` (validated by :func:`_check_key_passes`)
     overrides the policy; a program without the pass stages (``cake_jit.KEY_PASS_STAGES_OF[program]`` in ``stages``)
-    serves one pass only.  Otherwise the record's policy (:meth:`KeyPassPolicy.passes`) decides for a row whose pass
-    scratch fits one token chunk (``T`` within :meth:`KeyPassPolicy.token_chunk` of ``items_per_token`` dQ partial
-    blocks per token: ``HEAD_WINDOW_ITEMS`` above 64 heads); a longer row, or a record without a policy, takes one
-    pass."""
+    serves one pass only.  Otherwise a backward of more than one dQ partial block per token (``items_per_token``:
+    ``HEAD_WINDOW_ITEMS`` above 64 heads) takes one pass (see the comment above :class:`KeyPassPolicy`), and
+    the record's policy (:meth:`KeyPassPolicy.passes`) decides for a row whose pass scratch fits one token chunk
+    (``T`` within :meth:`KeyPassPolicy.token_chunk`); a longer row, or a record without a policy, takes one pass."""
     pass_stages = cake_jit.KEY_PASS_STAGES_OF[program]
     multi_pass = all(stage in stages for stage in pass_stages)
     if key_passes is not None:
@@ -464,10 +474,10 @@ def plan_key_passes(
         return int(key_passes)
     if int(num_segments) < 1:
         raise ValueError(f"num_segments must be >= 1, got {num_segments}")
-    if not multi_pass:
+    if not multi_pass or int(items_per_token) > 1:
         return 1
     policy = KeyPassPolicy.from_record(record)
-    if policy is None or int(num_queries) > policy.token_chunk(topk, items_per_token):
+    if policy is None or int(num_queries) > policy.token_chunk(topk):
         return 1
     return policy.passes(
         num_queries, num_kv, topk, num_segments=num_segments, arch=arch

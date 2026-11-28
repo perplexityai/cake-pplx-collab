@@ -225,6 +225,30 @@ sizes 2 and 4; world size 8 on B200). 56-token units ran 6-28% slower with
 12288 tokens on the 212-SM VR200, where 220 units for 212 CTAs make 112-token
 runs instead of 64; the lane-run check keeps such plans out of the table.
 
+With the device's architecture as well, the table has more units on the parts
+where they were measured (`kcp_jit.DYN_CP_V2_PARTS`): the 148-SM B200 at world
+sizes 2, 4 and 8, and the 152-SM GB300 and 212-SM VR200 at world sizes 2 and 4,
+each for at most 512 channels and at most 32768 tokens on the rank. There a
+call tries these units in order (`kcp_jit.dyn_cp_units`):
+
+| Device | World size | Tokens on the rank | `M` |
+| --- | --- | --- | --- |
+| VR200 | 2 or 4 | at least 16384 | 40, when a lane has at most 2 units and its run is no longer than with 64-token units |
+| all three | 2 | at least 8192 | 56, unless its lanes' runs are longer than with 64-token units |
+| GB300 | 4 | at least 16384 | 56, unless its lanes' runs are longer than with 64-token units |
+
+A call there without a table unit takes 56-token units for idle lanes only
+when their runs are no longer than with 64-token units: before, the idle-unit
+rule took back the 56-token plan the lane-run check had refused (for example
+18432 tokens on B200 and GB300 and 24576 tokens on VR200 at world size 2:
+runs of 168 tokens instead of 128). Measured against the 0.2.23 plan on these
+parts (backward and checkpointed backward; contiguous, zigzag, three-tensor
+and CUDA Graph replay calls; 8 groups each, 10 for replay), no changed row was
+slower and the faster backward rows ran at 0.86-0.95 of the time (idle-unit
+check), 0.80-0.90 (40-token units), 0.92-0.97 (56-token units from 8192
+tokens) and 0.92-0.95 (GB300, world size 4). Every other device, world size,
+channel count or sequence length keeps the plan above.
+
 Under any of these conditions, the one-program backward (`kcp_bwd`) runs after the wait instead:
 
 - `bwd_reserve_sms >= 1`

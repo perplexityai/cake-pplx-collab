@@ -4097,11 +4097,11 @@ def test_device_logprob_backward_makes_its_gradient_buffers_behind_the_recompute
         inp = _device_inputs(T, "ce", W=glm_weight)
     cache = cake_backend.BINDING_CACHE
     cache.clear()
-    # the default Function's recompute (a small call where a backward follows would run the kept logits).  A small
-    # call's bindings hold its staged rows' address (one allocation per call): the discarded call in between leaves the
-    # allocator as the recorded call finds it (``first``'s outputs stay alive), so the recorded call meets the binding
-    # the discarded call remembered
-    with _small_t_keep(False):
+    # the default Function's recompute (a small call where a backward follows would run the kept logits; a one-row
+    # call, the one-pass route: both off).  A small call's bindings hold its staged rows' address (one allocation per
+    # call): the discarded call in between leaves the allocator as the recorded call finds it (``first``'s outputs stay
+    # alive), so the recorded call meets the binding the discarded call remembered
+    with _small_t_keep(False), _logprob_one_pass(False):
         first = _run(inp, 4096, entry="logprob", backend="cake")
         _run(inp, 4096, entry="logprob", backend="cake")
         misses = cache.misses
@@ -4122,7 +4122,7 @@ def test_device_logprob_backward_makes_its_gradient_buffers_behind_the_recompute
     contract_lm_head(again, inp, entry="logprob")
 
     def launch(draw):
-        with _small_t_keep(False):
+        with _small_t_keep(False), _logprob_one_pass(False):
             _run(draw, 4096, entry="logprob", backend="cake")
             _run(draw, 4096, entry="logprob", backend="cake")
             before = cache.misses
@@ -11222,8 +11222,9 @@ def test_device_logprob_keep_one_pass(glm_weight, record_property, T, C, ignore,
     with _cache(True) as cache:
         cache.clear()
         # the default Function's path: a small call (T <= SMALL_T_KEEP_MAX_ROWS) with a backward would run the kept
-        # logits (set_small_t_keep) on its padded rows and add their kept bindings; padding and that routing off
-        with _small_pad_rows(0), _small_t_keep(False):
+        # logits (set_small_t_keep) on its padded rows and add their kept bindings, a one-row call the one-pass route
+        # (set_logprob_one_pass); padding and those routes off
+        with _small_pad_rows(0), _small_t_keep(False), _logprob_one_pass(False):
             base = _run(inp, C, entry="logprob", backend="cake", **switches)
         with _kept_form(**form):
             keep = [
@@ -18760,11 +18761,12 @@ def test_device_small_t_keep_routes_small_logprob_calls(glm_weight, T):
     """The small-call kept logits (on by default): a log-probability call of at most ``SMALL_T_KEEP_MAX_ROWS`` rows
     where a backward can follow runs the kept-logits Function and gives the default Function's bits (``logp`` / ``dW``;
     ``dX`` with one dX slice pinned); 257 rows, and a call under ``torch.no_grad``, run the default Function.
-    Small-call padding off: a padded call returns a slice of the kept call's output."""
+    Small-call padding off: a padded call returns a slice of the kept call's output.  The one-pass log-probability
+    route is off (``set_logprob_one_pass``): by default it takes the one-row call without ``gemm_tuning``."""
     _require_program(entry="logprob")
     inp = _device_inputs(T, "ce", W=glm_weight, ignore_frac=0.0)
     kw = dict(backend="cake", entry="logprob", gemm_tuning=_ONE_SLICE)
-    with _small_pad_rows(0):
+    with _small_pad_rows(0), _logprob_one_pass(False):
         with _small_t_keep(False):
             base = _run(inp, 4096, **kw)
         X = inp.X.detach().requires_grad_(True)
@@ -18832,8 +18834,9 @@ def test_device_small_call_pads_to_the_entry_default(glm_weight, entry, monkeypa
     """With the shipped defaults a one-row call stages ``small_pad_rows(entry, device)`` rows: the device
     architecture's :data:`SMALL_PAD_ROWS_LOSS_BY_ARCH` entry (else 16) for the loss entry and its
     :data:`SMALL_PAD_ROWS_LOGPROB_BY_ARCH` entry (else 16) for the log-probability entries (plain and with a
-    temperature); the per-row output keeps one row.  The one-pass cross-entropy is off
-    (``one_pass_rows`` empty): by default a T = 1 loss call at ``ONE_PASS_HIDDEN`` takes it and stages nothing."""
+    temperature); the per-row output keeps one row.  The one-pass routes are off (``one_pass_rows`` empty,
+    ``set_logprob_one_pass(False)``): by default a T = 1 loss or log-probability call at ``ONE_PASS_HIDDEN`` takes one
+    and stages nothing."""
     if entry == "temperature":
         _require_tau_program()
         inp = _tau_inputs(1, W=glm_weight, ignore_frac=0.0)
@@ -18857,7 +18860,7 @@ def test_device_small_call_pads_to_the_entry_default(glm_weight, entry, monkeypa
         return apply(X, labels, rows, *rest)
 
     monkeypatch.setattr(cake_backend._SmallCallStage, "apply", spy)
-    with _small_pad_rows(None), _one_pass_rows(()):
+    with _small_pad_rows(None), _one_pass_rows(()), _logprob_one_pass(False):
         out = _run(inp, 4096, entry=kind, backend="cake")
     assert seen == [expected], seen
     assert tuple(out["logp"].shape) == (1,)
@@ -18866,8 +18869,8 @@ def test_device_small_call_pads_to_the_entry_default(glm_weight, entry, monkeypa
 @pytest.mark.parametrize("entry", ["loss", "logprob"])
 def test_device_small_pad_has_no_host_synchronization(glm_weight, entry):
     """A padded small call (T = 1 padded to 16, forward and backward) synchronizes nothing (PyTorch's
-    synchronization debug mode at ``"error"`` raises nothing).  The one-pass cross-entropy is off (``one_pass_rows``
-    empty), so the loss call is staged and padded too."""
+    synchronization debug mode at ``"error"`` raises nothing).  The one-pass routes are off (``one_pass_rows`` empty,
+    ``set_logprob_one_pass(False)``), so the loss and log-probability calls are staged and padded."""
     _require_program(entry=entry)
     inp = _device_inputs(1, "ce", W=glm_weight, ignore_frac=0.0)
     X = inp.X.detach().requires_grad_(True)
@@ -18878,7 +18881,7 @@ def test_device_small_pad_has_no_host_synchronization(glm_weight, entry):
             X, W, inp.labels, entry, loss_div=inp.loss_div, dlogp=inp.dlogp
         )
 
-    with _small_pad_rows(16), _one_pass_rows(()):
+    with _small_pad_rows(16), _one_pass_rows(()), _logprob_one_pass(False):
         for _ in range(2):
             step()
         torch.cuda.synchronize()
@@ -18898,9 +18901,9 @@ def test_device_small_call_repeats_its_bindings(glm_weight, T, form):
     """A repeated small call (T = 1 padded to 16, T = 32 / 256 unpadded; the loss entry, the log-probability entry on its
     small-call kept logits and on the default Function, a per-token temperature) meets the bindings the previous call
     remembered: the second and the third call add binding hits and no miss -- every staged tensor of a call is a view
-    of one allocation, which the caching allocator hands back to the next call of the same shape.  The one-pass
-    cross-entropy is off (``one_pass_rows`` empty): a T = 1 loss call takes the small-call path, not the one-pass
-    programs."""
+    of one allocation, which the caching allocator hands back to the next call of the same shape.  The one-pass routes
+    are off (``one_pass_rows`` empty, ``set_logprob_one_pass(False)``): a T = 1 loss or log-probability call takes the
+    small-call path, not the one-pass programs."""
     entry = "loss" if form == "loss" else "logprob"
     _require_program(entry=entry)
     if form == "temperature":
@@ -18910,7 +18913,7 @@ def test_device_small_call_repeats_its_bindings(glm_weight, T, form):
         inp = _device_inputs(T, "ce", W=glm_weight, ignore_frac=0.0 if T == 1 else 0.25)
     cache = cake_backend.BINDING_CACHE
     seen = []
-    with _small_t_keep(form != "nokeep"), _one_pass_rows(()):
+    with _small_t_keep(form != "nokeep"), _one_pass_rows(()), _logprob_one_pass(False):
         cache.clear()
         for _ in range(3):
             hits, misses = cache.hits, cache.misses
@@ -18919,6 +18922,589 @@ def test_device_small_call_repeats_its_bindings(glm_weight, T, form):
     assert seen[0][1] > 0, seen  # the first call binds
     for added_hits, added_misses in seen[1:]:
         assert added_misses == 0 and added_hits > 0, seen
+
+
+# ---------------------------------------------------------------------------
+# The weight gradient of a padded small call (set_small_pad_dw_entries): the deferred dW GEMM of the loss entry and the
+# kept log-probability backward's dW-only GEMM read the call's first roundup(T, 16) staged rows
+# ---------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _small_pad_dw_entries(entries):
+    previous = cake_backend.set_small_pad_dw_entries(entries)
+    try:
+        yield
+    finally:
+        cake_backend.set_small_pad_dw_entries(previous)
+
+
+def _roundup16(T: int) -> int:
+    return -(-T // 16) * 16
+
+
+def test_small_pad_dw_entries_switch_validates_and_restores():
+    """``set_small_pad_dw_entries`` takes an iterable of the entries ``"loss"`` / ``"logprob"`` (``SMALL_PAD_DW_NAMES``;
+    an iterator read once; empty = off) and returns the previous set; the default is ``SMALL_PAD_DW_ENTRIES_DEFAULT``,
+    a subset of the names (compared with the constant, not a literal: the A/B decides it)."""
+    names = cake_backend.SMALL_PAD_DW_NAMES
+    assert names == frozenset({"loss", "logprob"})
+    default = cake_backend.SMALL_PAD_DW_ENTRIES_DEFAULT
+    assert isinstance(default, frozenset) and default <= names
+    current = cake_backend.small_pad_dw_entries()
+    assert current == default
+    for bad in (
+        "loss",
+        1,
+        True,
+        {"temperature"},
+        None,
+        [1],
+        (e for e in ["loss", "x"]),
+    ):
+        with pytest.raises((ValueError, TypeError)):
+            cake_backend.set_small_pad_dw_entries(bad)
+    assert cake_backend.small_pad_dw_entries() == current
+    assert cake_backend.set_small_pad_dw_entries(()) == current
+    assert cake_backend.small_pad_dw_entries() == frozenset()
+    assert cake_backend.set_small_pad_dw_entries(e for e in ["loss"]) == frozenset()
+    assert cake_backend.small_pad_dw_entries() == frozenset({"loss"})
+    assert cake_backend.set_small_pad_dw_entries(names) == frozenset({"loss"})
+    assert cake_backend.small_pad_dw_entries() == names
+    assert cake_backend.set_small_pad_dw_entries(current) == names
+    assert cake_backend.small_pad_dw_entries() == current
+
+
+def test_small_pad_dw_k_rows_rule():
+    """``_small_pad_dw_k_rows``: ``roundup(T, 16)`` when that is below the staged rows, ``T`` is at most
+    ``SMALL_PAD_DW_MAX_ROWS`` and the entry is on, else ``None``; the two entries switch independently (host values
+    alone)."""
+    rule = cake_backend._small_pad_dw_k_rows
+    top = cake_backend.SMALL_PAD_DW_MAX_ROWS
+    assert 32 <= top <= 256
+    # (T, staged rows, K below the row cap)
+    table = [
+        (1, 256, 16),
+        (2, 256, 16),
+        (16, 256, 16),
+        (17, 256, 32),
+        (33, 256, 48),
+        (65, 256, 80),
+        (128, 256, 128),
+        (129, 256, 144),
+        (240, 256, 240),
+        (241, 256, None),
+        (5, 16, None),
+        (5, 32, 16),
+        (17, 32, None),
+        (31, 32, None),
+    ]
+    for on in (("loss", "logprob"), ("loss",), ("logprob",), ()):
+        with _small_pad_dw_entries(on):
+            for entry in ("loss", "logprob"):
+                for T, rows, want in table:
+                    expected = want if entry in on and T <= top else None
+                    assert rule(entry, T, rows) == expected, (on, entry, T, rows)
+
+
+def _staged_host_inputs(T: int, rows: int):
+    """A ``T``-row cross-entropy problem on the CPU (the reference backend's host GEMM sums each element's rows in
+    order) staged as ``rows`` rows the way a padded small call stages it: its own rows, then zero ``X`` rows with
+    ``IGNORE_INDEX`` labels."""
+    inp = _host_inputs(T, ignore_frac=0.0, device=CPU)
+    X = torch.zeros((rows, inp.H), dtype=inp.X.dtype, device=inp.X.device)
+    X[:T] = inp.X
+    labels = torch.full(
+        (rows,), cake_backend.IGNORE_INDEX, dtype=torch.int64, device=inp.X.device
+    )
+    labels[:T] = inp.labels
+    dlogp = torch.zeros((rows,), dtype=torch.float32, device=inp.X.device)
+    dlogp[:T] = inp.dlogp
+    return dataclasses.replace(inp, X=X, labels=labels, dlogp=dlogp)
+
+
+def test_loss_forward_cuts_deferred_rows():
+    """``_loss_forward(dw_k_rows=K)`` on a staged call (the reference backend on the CPU, uncompacted, the fused dW
+    cast): the deferred operands are the first ``K`` rows of the uncut call's (contiguous ``dz`` rows, views that keep
+    the staged buffers alive), the rows past ``K`` are zero ``dz``, and the backward gives the uncut call's ``dX`` bits
+    and ``dW`` values; ``None`` or ``K`` not below the staged rows cuts nothing; a call of two chunks keeps every row
+    of its last chunk (its deferred rows do not start at row 0); an unfused call has no deferred operands."""
+    inp = _staged_host_inputs(5, 256)
+    kw = {
+        "objective": "ce",
+        "loss_div": inp.loss_div,
+        "chunk_size": 4096,
+        "need_dx": True,
+        "need_dw": True,
+        "backend": "reference",
+        "compact_rows": False,
+        "fuse_dw_cast": True,
+    }
+    full = cake_backend._loss_forward(inp.X, inp.W, inp.labels, **kw)
+    cut = cake_backend._loss_forward(inp.X, inp.W, inp.labels, dw_k_rows=16, **kw)
+    assert tuple(full.dz_last.shape) == (256, inp.V) and tuple(full.x_last.shape) == (
+        256,
+        inp.H,
+    )
+    assert tuple(cut.dz_last.shape) == (16, inp.V) and tuple(cut.x_last.shape) == (
+        16,
+        inp.H,
+    )
+    # views: the staged rows' buffers stay alive with them
+    assert cut.dz_last.is_contiguous()
+    assert cut.dz_last.untyped_storage().nbytes() >= 256 * inp.V * 2
+    assert _same_bits(cut.x_last, inp.X[:16])
+    assert _same_bits(cut.dz_last, full.dz_last[:16])
+    assert not bool(full.dz_last[16:].float().any())
+    dx_cut, dw_cut = cut.backward()
+    dx_full, dw_full = full.backward()
+    assert torch.equal(dw_cut, dw_full) and _same_bits(dx_cut, dx_full)
+    for k in (None, 256, 300):
+        kept = cake_backend._loss_forward(inp.X, inp.W, inp.labels, dw_k_rows=k, **kw)
+        assert kept.dz_last.shape[0] == 256 and kept.x_last.shape[0] == 256, k
+    two = cake_backend._loss_forward(
+        inp.X, inp.W, inp.labels, dw_k_rows=16, **{**kw, "chunk_size": 128}
+    )
+    assert two.dw_acc is not None
+    assert two.dz_last.shape[0] == 128 and two.x_last.shape[0] == 128
+    assert _same_bits(two.x_last, inp.X[128:])
+    unfused = cake_backend._loss_forward(
+        inp.X, inp.W, inp.labels, dw_k_rows=16, **{**kw, "fuse_dw_cast": False}
+    )
+    assert unfused.dz_last is None and unfused.x_last is None
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "plain",
+        "x_only",
+        "w_only",
+        "no_grad",
+        "nonreentrant",
+        "forward",
+        "reentrant",
+        "selective_recompute",
+        "retained",
+    ],
+)
+def test_loss_entry_passes_dw_k_rows_in_every_placement(monkeypatch, kind):
+    """The loss entry's ``_dw_k_rows`` reaches every forward that forms ``dW`` (the reference backend, uncompacted,
+    staged-like rows; plain, ``X`` / ``W`` alone, a non-reentrant checkpoint under the placement ``"auto"`` -- the
+    recomputation forms ``dW`` -- and ``"forward"``, a reentrant and a selective checkpoint, a retained graph's two
+    backward passes) and the step's ``loss`` / ``dX`` / ``dW`` are those of the call without it (``dW`` by value);
+    under ``torch.no_grad`` no forward forms ``dW``."""
+    inp = _staged_host_inputs(5, 256)
+    seen = []
+    real = cake_backend._loss_forward
+
+    def spy(*args, **kwargs):
+        seen.append((kwargs.get("dw_k_rows"), bool(kwargs.get("need_dw", True))))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(cake_backend, "_loss_forward", spy)
+
+    def step(dw_k_rows):
+        X = inp.X.detach().requires_grad_(kind != "w_only")
+        W = inp.W.detach().requires_grad_(kind != "x_only")
+
+        def head(a, b):
+            return cake_backend.cake_lm_head_nondet_train_loss(
+                a,
+                b,
+                inp.labels,
+                loss_div=inp.loss_div,
+                chunk_size=4096,
+                backend="reference",
+                compact_rows=False,
+                _dw_k_rows=dw_k_rows,
+            )
+
+        out = {}
+        with contextlib.ExitStack() as stack:
+            if kind == "forward":
+                stack.enter_context(_placement("forward"))
+            if kind == "no_grad":
+                with torch.no_grad():
+                    out["loss"] = head(X, W)
+                return out
+            ckpt = {"nonreentrant": "nonreentrant", "forward": "nonreentrant"}.get(
+                kind, kind
+            )
+            if ckpt in ("plain", "x_only", "w_only", "retained"):
+                ckpt = "plain"
+            loss = _checkpointed(ckpt, head, X, W)
+            out["loss"] = loss.detach()
+            if kind == "retained":
+                for label, retain in (("", True), ("_again", False)):
+                    dx, dw = torch.autograd.grad(loss, (X, W), retain_graph=retain)
+                    out["dX" + label], out["dW" + label] = dx, dw
+            else:
+                loss.backward()
+                out["dX"], out["dW"] = X.grad, W.grad
+        return out
+
+    want = step(None)
+    seen.clear()
+    got = step(16)
+    formed = [k for k, need_dw in seen if need_dw]
+    if kind in ("no_grad", "x_only"):
+        assert formed == [], seen
+    else:
+        assert formed and all(k == 16 for k in formed), seen
+    for key, value in want.items():
+        if key.startswith("dW") and value is not None:
+            assert torch.equal(got[key], value), key
+        else:
+            assert _same_bits(got[key], value), key
+
+
+def test_kept_ordered_backward_cuts_the_weight_gradient(monkeypatch):
+    """``backward_logprob_keep_ordered(dw_k_rows=K)`` (a host spy on ``backward_logprob_keep``): the dX call takes
+    every row and the forward's views; the ``dz_ready`` weight-gradient call takes the first ``K`` rows of ``X`` /
+    ``labels`` / ``lse`` / ``dlogp`` and of the kept rows (views at the same addresses) with ``chunk_size = K``; no
+    cut without ``dw_k_rows``, with a row index (a compacted call), with ``K`` not below the rows, and on the
+    ``W``-only call (every row)."""
+    calls = []
+
+    def spy(X, W, labels, lse, dlogp, logits, **kw):
+        calls.append(
+            dict(X=X, labels=labels, lse=lse, dlogp=dlogp, logits=logits, **kw)
+        )
+        return (
+            torch.zeros(1) if kw.get("need_dx", True) else None,
+            torch.zeros(1) if kw.get("need_dw", True) else None,
+        )
+
+    monkeypatch.setattr(cake_backend, "backward_logprob_keep", spy)
+    rows, V, H = 256, V_HOST, H_HOST
+    X = torch.zeros((rows, H), dtype=torch.bfloat16)
+    W = torch.zeros((V, H), dtype=torch.bfloat16)
+    labels = torch.zeros((rows,), dtype=torch.int64)
+    lse, dlogp = torch.zeros((rows,)), torch.zeros((rows,))
+    kept = torch.zeros((rows, V), dtype=torch.bfloat16)
+    views = (kept[:128], kept[128:])
+
+    def run(**kw):
+        calls.clear()
+        cake_backend.backward_logprob_keep_ordered(
+            X, W, labels, lse, dlogp, kept, views, chunk_size=128, **kw
+        )
+        return list(calls)
+
+    dx_call, dw_call = run(dw_k_rows=16, row_index=None)
+    assert dx_call["logits"] is views and dx_call["X"] is X
+    assert dx_call["need_dx"] and not dx_call["need_dw"]
+    assert dw_call["need_dw"] and not dw_call["need_dx"] and dw_call["dz_ready"]
+    assert dw_call["chunk_size"] == 16
+    for name, full in (("X", X), ("labels", labels), ("lse", lse), ("dlogp", dlogp)):
+        part = dw_call[name]
+        assert part.shape[0] == 16 and part.data_ptr() == full.data_ptr(), name
+    (kept_part,) = dw_call["logits"]
+    assert tuple(kept_part.shape) == (16, V) and kept_part.data_ptr() == kept.data_ptr()
+    for kw in (
+        {"dw_k_rows": None, "row_index": None},
+        {"dw_k_rows": 16, "row_index": torch.arange(rows)},
+        {"dw_k_rows": 256, "row_index": None},
+        {"dw_k_rows": 300, "row_index": None},
+    ):
+        dw_call = run(**kw)[-1]
+        assert dw_call["X"] is X and dw_call["logits"][0] is kept, kw
+        assert dw_call["chunk_size"] == rows, kw
+    (w_only,) = run(dw_k_rows=16, row_index=None, need_dx=False)
+    assert w_only["X"] is X and w_only["logits"][0] is kept and not w_only["need_dx"]
+
+
+def _dw_k_rows_spies(monkeypatch):
+    """The rows of every weight-gradient GEMM of the block's small calls, in order: ``dw_cast``'s ``dz`` rows (the
+    loss entry's deferred GEMM) and the ``X`` rows of every ``backward_logprob_keep`` call that forms ``dW``."""
+    seen: list = []
+    real_dw, real_keep = cake_backend.dw_cast, cake_backend.backward_logprob_keep
+
+    def dw_spy(dz_last, *args, **kwargs):
+        seen.append(int(dz_last.shape[0]))
+        return real_dw(dz_last, *args, **kwargs)
+
+    def keep_spy(X, *args, **kwargs):
+        if kwargs.get("need_dw", True):
+            seen.append(int(X.shape[0]))
+        return real_keep(X, *args, **kwargs)
+
+    monkeypatch.setattr(cake_backend, "dw_cast", dw_spy)
+    monkeypatch.setattr(cake_backend, "backward_logprob_keep", keep_spy)
+    return seen
+
+
+@contextlib.contextmanager
+def _staged_small_calls(pad: int, on: bool):
+    """Small calls padded to ``pad`` rows, the one-pass routes off (so one- and two-row calls stage too), the
+    small-call kept logits on, and the weight-gradient cut of both entries on or off."""
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(_small_pad_rows(pad))
+        stack.enter_context(_one_pass_rows(()))
+        stack.enter_context(_logprob_one_pass(False))
+        stack.enter_context(_small_t_keep(True))
+        stack.enter_context(
+            _small_pad_dw_entries(cake_backend.SMALL_PAD_DW_NAMES if on else ())
+        )
+        yield
+
+
+@pytest.mark.parametrize("on", [True, False])
+@pytest.mark.parametrize("entry", ["loss", "logprob"])
+@pytest.mark.parametrize("T", [1, 2, 8, 15, 17, 32, 33, 64, 65, 128])
+def test_device_small_pad_dw_k_rows_reach_the_gemm(
+    glm_weight, monkeypatch, T, entry, on
+):
+    """A small call staged at 256 rows (``set_small_pad_rows(256)``; the loss entry's deferred dW GEMM, the kept
+    log-probability backward's ``dW``-only GEMM) runs its weight-gradient GEMM over ``roundup(T, 16)`` staged rows with
+    ``set_small_pad_dw_entries`` on (``T`` up to ``SMALL_PAD_DW_MAX_ROWS``) and over 256 rows with it off; the call
+    holds its contract either way."""
+    _require_program(entry=entry)
+    inp = _device_inputs(T, "ce", W=glm_weight, ignore_frac=0.0 if T < 4 else 0.25)
+    seen = _dw_k_rows_spies(monkeypatch)
+    with _staged_small_calls(256, on):
+        out = _run(inp, 4096, entry=entry, backend="cake")
+    cut = on and T <= cake_backend.SMALL_PAD_DW_MAX_ROWS
+    assert seen == [_roundup16(T) if cut else 256], seen
+    contract_lm_head(out, inp, entry=entry)
+
+
+def test_device_small_pad_dw_k_rows_default_pads_on_sm_107a(glm_weight, monkeypatch):
+    """With the shipped pads on sm_107a (R200) the cut stops where the staging does: a loss call of 129 rows stages its
+    own rows (no cut), a log-probability call of 241 rows stages 256 rows but ``roundup(241, 16) = 256`` (no cut);
+    a log-probability call of 129 rows stages 256 rows and cuts only up to ``SMALL_PAD_DW_MAX_ROWS`` rows; a loss call
+    of 2 rows (the one-pass routes off) runs its weight gradient over 16 rows."""
+    _require_program(entry="loss")
+    if cake_backend.arch_for(CUDA) != "sm_107a":
+        pytest.skip("the default 256-row pads are sm_107a's")
+    seen = _dw_k_rows_spies(monkeypatch)
+    above = 144 if 129 <= cake_backend.SMALL_PAD_DW_MAX_ROWS else 256
+    cases = (
+        (2, "loss", 16),
+        (129, "loss", 129),
+        (129, "logprob", above),
+        (241, "logprob", 256),
+    )
+    with (
+        _small_pad_rows(None),
+        _one_pass_rows(()),
+        _logprob_one_pass(False),
+        _small_t_keep(True),
+        _small_pad_dw_entries(cake_backend.SMALL_PAD_DW_NAMES),
+    ):
+        for T, entry, want in cases:
+            seen.clear()
+            inp = _device_inputs(T, "ce", W=glm_weight, ignore_frac=0.25)
+            _run(inp, 4096, entry=entry, backend="cake")
+            assert seen == [want], (T, entry, seen)
+
+
+@pytest.mark.parametrize("pad", [32, 256])
+@pytest.mark.parametrize("T", [5, 17])
+@pytest.mark.parametrize(
+    "entry, objective, form",
+    [
+        ("loss", "ce", None),
+        ("loss", "policy", None),
+        ("logprob", "ce", None),
+        ("logprob", "ce", "nokeep"),
+        ("logprob", "ce", "temperature"),
+    ],
+)
+def test_device_small_pad_dw_k_rows_is_every_staged_row(
+    glm_weight, T, pad, entry, objective, form
+):
+    """The weight-gradient cut changes no output: a padded small call (a quarter of its rows ignored; pads 32 and 256)
+    gives the same ``loss`` / ``logp`` / ``dX`` bits and the same ``dW`` values (a signed zero may differ) with
+    ``set_small_pad_dw_entries`` on and off -- the loss entry (CE, policy), the log-probability entry on its small-call
+    kept logits and on the default Function, and with a per-token temperature (the last two keep every staged row)."""
+    _require_program(entry=entry)
+    if form == "temperature":
+        _require_tau_program()
+        inp = _tau_inputs(T, W=glm_weight, ignore_frac=0.25)
+    else:
+        inp = _device_inputs(T, objective, W=glm_weight, ignore_frac=0.25)
+    out = {}
+    for on in (True, False):
+        with (
+            _shipped_zero_weight_floor(),
+            _staged_small_calls(pad, on),
+            _small_t_keep(form != "nokeep"),
+        ):
+            out[on] = _run(inp, 4096, entry=entry, backend="cake")
+    for key in ("loss", "logp", "dX"):
+        assert _same_bits(out[True][key], out[False][key]), key
+    assert torch.equal(out[True]["dW"], out[False]["dW"])
+
+
+@pytest.mark.parametrize("T", [2, 8, 16, 32, 64, 128])
+def test_device_small_pad_dw_k_rows_meets_the_naive_tier(
+    glm_weight, record_property, T
+):
+    """A loss call staged at 256 rows with the weight-gradient cut on (its deferred GEMM) meets the naive tier over the
+    draws with a quarter of its rows ignored -- at the production head (``H`` 6144, ``V`` 154880) for ``T`` 16, at
+    ``JUDGE_H`` / ``JUDGE_V`` otherwise -- through its cut GEMM (``roundup(T, 16)`` rows; ``T`` up to the 128 rows of
+    ``SMALL_PAD_DW_MAX_ROWS``).  The kept log-probability backward's cut gives the uncut call's values
+    (:func:`test_device_small_pad_dw_k_rows_keep_the_logprob_values`)."""
+    _require_program(entry="loss")
+
+    def launch(draw):
+        with _staged_small_calls(256, True):
+            return _run(draw, 4096, entry="loss", backend="cake")
+
+    shape = {"H": GLM_H, "V": GLM_V} if T == 16 else {}
+    _judge_device(record_property, T, launch, entry="loss", ignore_frac=0.25, **shape)
+
+
+@pytest.mark.parametrize("T", [2, 8, 16, 32, 64, 128])
+def test_device_small_pad_dw_k_rows_keep_the_logprob_values(glm_weight, T):
+    """The kept log-probability backward's cut changes no value at every row count it applies to (``T`` 2 to 128 staged
+    at 256 rows, a quarter of the rows ignored): the same ``logp`` / ``dX`` bits and the same ``dW`` values (a signed
+    zero may differ) with ``set_small_pad_dw_entries`` on and off -- the padded rows add exact zeros -- so the cut
+    call's accuracy is the uncut call's."""
+    _require_program(entry="logprob")
+    inp = _device_inputs(T, "ce", W=glm_weight, ignore_frac=0.25)
+    out = {}
+    for on in (True, False):
+        with _shipped_zero_weight_floor(), _staged_small_calls(256, on):
+            out[on] = _run(inp, 4096, entry="logprob", backend="cake")
+    for key in ("logp", "dX"):
+        assert _same_bits(out[True][key], out[False][key]), key
+    assert torch.equal(out[True]["dW"], out[False]["dW"])
+
+
+# The forms of a padded small call whose weight-gradient rows the cut sets (``rows``: the rows of every
+# weight-gradient GEMM with the cut on; 256 = every staged row, [] = no weight-gradient GEMM of the spies)
+DW_K_ROWS_FORMS = {
+    "plain": [16],
+    "x_only": [],
+    "w_only": [16],
+    "checkpoint": [16],
+    "checkpoint_forward": [16],
+    "reentrant": [16],
+    "selective": [16],
+    "retained": [16, 16],
+    "unfused": [],
+    "cache_off": [16],
+    "every_row_ignored": [16],
+    "opt_in_fast": [16],
+    "kept": [16],
+    "kept_dx_side": [16],
+    "kept_w_only": [256],
+    "kept_dx_one_pass": [256],
+    "kept_retained": [16],
+}
+
+
+def _dw_k_rows_form_step(inp, form):
+    """One step of a padded small call (``inp``, staged at 256 rows) in ``form`` (:data:`DW_K_ROWS_FORMS`); returns its
+    outputs (a retained graph's second backward pass as ``dX_again`` / ``dW_again``)."""
+    if form.startswith("kept"):
+        if form == "kept_dx_side":
+            with _kept_form(dx_side=True):
+                return _run(inp, 4096, entry="logprob", backend="cake")
+        if form == "kept_dx_one_pass":
+            with _kept_form(dx_one_pass=True):
+                return _run(inp, 4096, entry="logprob", backend="cake")
+        if form == "kept_w_only":
+            return _run(inp, 4096, entry="logprob", backend="cake", train_x=False)
+        if form == "kept":
+            return _run(inp, 4096, entry="logprob", backend="cake")
+        X = inp.X.detach().requires_grad_(True)
+        W = inp.W.detach().requires_grad_(True)
+        logp = cake_backend.cake_lm_head_nondet_train_logprob(
+            X, W, inp.labels, chunk_size=4096
+        )
+        out = {"logp": logp.detach()}
+        for label, retain in (("", True), ("_again", False)):
+            dx, dw = torch.autograd.grad(
+                logp, (X, W), grad_outputs=inp.dlogp, retain_graph=retain
+            )
+            out["dX" + label], out["dW" + label] = dx, dw
+        torch.cuda.synchronize()
+        return out
+    if form in ("plain", "every_row_ignored"):
+        return _run(inp, 4096, backend="cake")
+    if form == "x_only":
+        return _run(inp, 4096, backend="cake", train_w=False)
+    if form == "w_only":
+        return _run(inp, 4096, backend="cake", train_x=False)
+    if form == "unfused":
+        return _run(inp, 4096, backend="cake", fuse_dw_cast=False)
+    if form == "opt_in_fast":
+        return _run(inp, 4096, backend="cake", memory_mode="fast")
+    if form == "cache_off":
+        with _cache(False):
+            return _run(inp, 4096, backend="cake")
+    X = inp.X.detach().requires_grad_(True)
+    W = inp.W.detach().requires_grad_(True)
+
+    def head(a, b):
+        return cake_backend.cake_lm_head_nondet_train_loss(
+            a, b, inp.labels, loss_div=inp.loss_div, chunk_size=4096
+        )
+
+    if form == "retained":
+        loss = head(X, W)
+        out = {"loss": loss.detach()}
+        for label, retain in (("", True), ("_again", False)):
+            dx, dw = torch.autograd.grad(loss, (X, W), retain_graph=retain)
+            out["dX" + label], out["dW" + label] = dx, dw
+        torch.cuda.synchronize()
+        return out
+    kind = {
+        "checkpoint": "nonreentrant",
+        "checkpoint_forward": "nonreentrant",
+        "reentrant": "reentrant",
+        "selective": "selective_recompute",
+    }[form]
+    with (
+        _placement("forward")
+        if form == "checkpoint_forward"
+        else contextlib.nullcontext()
+    ):
+        loss = _checkpointed(kind, head, X, W)
+        loss.backward()
+    torch.cuda.synchronize()
+    return {"loss": loss.detach(), "dX": X.grad, "dW": W.grad}
+
+
+@pytest.mark.parametrize("form", list(DW_K_ROWS_FORMS))
+def test_device_small_pad_dw_k_rows_every_form(glm_weight, monkeypatch, form):
+    """Every form of a padded small call (T = 5 staged at 256 rows; a quarter of the rows ignored, all of them in
+    ``every_row_ignored``) runs its weight-gradient GEMMs over the rows :data:`DW_K_ROWS_FORMS` lists with
+    ``set_small_pad_dw_entries`` on (``roundup(5, 16) = 16``; the kept ``W``-only and ``dx_one_pass`` forms keep every
+    staged row) and over every staged row with it off, and gives the same outputs either way (``dW`` by value: a
+    signed zero may differ): the loss entry's trainable sets, checkpoints (placement ``"auto"`` and ``"forward"``,
+    reentrant, selective), a retained graph's two backward passes, the unfused dW, the binding cache disabled, every
+    row ignored, the opt-in fast form, and the kept log-probability backward (``dx_side``, ``W`` alone,
+    ``dx_one_pass``, a retained graph -- whose second pass recomputes)."""
+    entry = "logprob" if form.startswith("kept") else "loss"
+    _require_program(entry=entry)
+    inp = _device_inputs(
+        5, "ce", W=glm_weight, ignore_frac=1.0 if form == "every_row_ignored" else 0.25
+    )
+    seen = _dw_k_rows_spies(monkeypatch)
+    out, rows = {}, {}
+    for on in (True, False):
+        seen.clear()
+        with _staged_small_calls(256, on):
+            out[on] = _dw_k_rows_form_step(inp, form)
+        rows[on] = list(seen)
+    want = DW_K_ROWS_FORMS[form]
+    assert rows[True] == want, (form, rows)
+    assert rows[False] == [256] * len(want), (form, rows)
+    assert out[True].keys() == out[False].keys()
+    for key, value in out[False].items():
+        if key in ("X", "W"):  # the leaves
+            continue
+        if value is None:
+            assert out[True][key] is None, key
+        elif key.startswith("dW"):
+            assert torch.equal(out[True][key], value), key
+        else:
+            assert _same_bits(out[True][key], value), key
 
 
 # ---------------------------------------------------------------------------
@@ -18943,6 +19529,39 @@ def _require_one_pass(T: int):
 
 
 @contextlib.contextmanager
+def _one_pass_split_rows(rows):
+    previous = cake_backend.set_one_pass_split_rows(rows)
+    try:
+        yield
+    finally:
+        cake_backend.set_one_pass_split_rows(previous)
+
+
+@contextlib.contextmanager
+def _one_pass_route(T: int, route: str = "kernel"):
+    """``one_pass_rows()`` = ``{T}`` and the forward with dX of ``T > 1`` rows per row (``route="split"``,
+    :func:`cake_backend.set_one_pass_split_rows`) or through the ``T``-row program (``"kernel"``); both switches set
+    explicitly (no default read) and restored."""
+    with _one_pass_rows({T}), _one_pass_split_rows({T} if route == "split" else ()):
+        yield
+
+
+def _require_one_pass_route(T: int, route: str = "kernel"):
+    _require_one_pass(T)
+    if route == "split":
+        _require_one_pass(1)  # the per-row forward runs the one-row programs
+
+
+# (T, route) of the one-pass forwards: one row; two rows through the two-row program; two rows per row (the ids of
+# the first two are the 0.3.10 ids of the same cases)
+ONE_PASS_ROUTES = [
+    pytest.param(1, "kernel", id="1"),
+    pytest.param(2, "kernel", id="2"),
+    pytest.param(2, "split", id="2-split"),
+]
+
+
+@contextlib.contextmanager
 def _one_pass_launches():
     """The one-pass stages the calls of the block launch, in order."""
     launched: list = []
@@ -18959,35 +19578,95 @@ def _one_pass_launches():
         cake_backend._one_pass_launch = original
 
 
-def _one_pass_stages(T: int, *, need_dx: bool = True, need_dw: bool = True) -> list:
+def _one_pass_stages(
+    T: int, *, need_dx: bool = True, need_dw: bool = True, split: bool = False
+) -> list:
+    """The one-pass stages of a ``T``-row step: the forward (per row with ``split`` and dX: the one-row forward and
+    merge per row), then the backward."""
     fwd, fwd_nodx = cake_backend.ONE_PASS_FWD_STAGES[T]
-    stages = [fwd if need_dx else fwd_nodx, cake_backend.ONE_PASS_COMBINE_STAGE]
+    combine = cake_backend.ONE_PASS_COMBINE_STAGE
+    if split and need_dx:
+        stages = [cake_backend.ONE_PASS_FWD_STAGES[1][0], combine] * T
+    else:
+        stages = [fwd if need_dx else fwd_nodx, combine]
     return stages + [cake_backend.ONE_PASS_DW_STAGE]
 
 
 def test_one_pass_switch_validates_and_restores():
-    """``set_one_pass_rows`` takes row counts with a one-pass forward and returns the previous set; the default is one
-    row."""
-    assert (
-        cake_backend.one_pass_rows()
-        == cake_backend.ONE_PASS_ROWS_DEFAULT
-        == frozenset({1})
-    )
+    """``set_one_pass_rows`` takes row counts with a one-pass forward and returns the previous set; the default is
+    ``ONE_PASS_ROWS_DEFAULT``, a set of such row counts (compared with the constant, not a literal: the A/B decides
+    it)."""
+    default = cake_backend.ONE_PASS_ROWS_DEFAULT
+    assert cake_backend.one_pass_rows() == default
+    assert default <= frozenset(cake_backend.ONE_PASS_FWD_STAGES)
     for bad in (1, True, "1", [3], [1.0], [0], [True]):
         with pytest.raises(ValueError):
             cake_backend.set_one_pass_rows(bad)
-    assert cake_backend.one_pass_rows() == frozenset({1})
-    assert cake_backend.set_one_pass_rows(()) == frozenset({1})
+    assert cake_backend.one_pass_rows() == default
+    assert cake_backend.set_one_pass_rows(()) == default
     assert cake_backend.set_one_pass_rows({1, 2}) == frozenset()
-    assert cake_backend.set_one_pass_rows(
-        cake_backend.ONE_PASS_ROWS_DEFAULT
-    ) == frozenset({1, 2})
+    assert cake_backend.set_one_pass_rows(default) == frozenset({1, 2})
+    assert cake_backend.one_pass_rows() == default
+
+
+def test_one_pass_split_switch_validates_and_restores():
+    """``set_one_pass_split_rows`` takes row counts above one with a one-pass forward (``{2}``; an iterator is read
+    once) and returns the previous set; the default is ``ONE_PASS_SPLIT_ROWS_DEFAULT``; it leaves ``one_pass_rows``
+    alone."""
+    default = cake_backend.ONE_PASS_SPLIT_ROWS_DEFAULT
+    assert cake_backend.one_pass_split_rows() == default
+    assert default <= frozenset(t for t in cake_backend.ONE_PASS_FWD_STAGES if t > 1)
+    rows = cake_backend.one_pass_rows()
+    for bad in (2, True, "2", [1], [3], [2.0], [0], [True], (r for r in [3])):
+        with pytest.raises(ValueError):
+            cake_backend.set_one_pass_split_rows(bad)
+    assert cake_backend.one_pass_split_rows() == default
+    assert cake_backend.set_one_pass_split_rows(()) == default
+    assert cake_backend.one_pass_split_rows() == frozenset()
+    assert cake_backend.set_one_pass_split_rows(r for r in [2]) == frozenset()
+    assert cake_backend.one_pass_split_rows() == frozenset({2})
+    assert cake_backend.set_one_pass_split_rows(default) == frozenset({2})
+    assert cake_backend.one_pass_split_rows() == default
+    assert cake_backend.one_pass_rows() == rows
+
+
+def test_one_pass_per_row_rule():
+    """``_one_pass_per_row``: a one-pass forward runs per row exactly when it forms dX, its row count is in
+    ``one_pass_split_rows()`` and the record registers the one-row programs (host values alone)."""
+    rule = cake_backend._one_pass_per_row
+    # (split rows, T, need_dx, the record's row counts, per row)
+    table = [
+        ((2,), 2, True, {1, 2}, True),
+        ((2,), 2, True, {2}, False),
+        ((2,), 2, True, set(), False),
+        ((2,), 2, False, {1, 2}, False),
+        ((2,), 1, True, {1, 2}, False),
+        ((2,), 1, False, {1, 2}, False),
+        ((), 2, True, {1, 2}, False),
+        ((), 2, False, {1, 2}, False),
+        ((), 1, True, {1, 2}, False),
+    ]
+    for split, T, need_dx, registered, want in table:
+        with _one_pass_split_rows(split):
+            got = rule(T, need_dx, frozenset(registered))
+        assert got == want, (split, T, need_dx, registered)
+
+
+def test_one_pass_defaults_run_two_rows_per_row():
+    """The shipped one-pass defaults never send a call with dX to the ``T``-row forward program of ``T > 1`` (GB300
+    ``one_pass_fwd_t2`` 764.67 us against about 292 us per row): every row count above one of
+    ``ONE_PASS_ROWS_DEFAULT`` is in ``ONE_PASS_SPLIT_ROWS_DEFAULT`` (turning the per-row route off takes the row count
+    out of both; checked on the constants, whatever their values)."""
+    rows = cake_backend.ONE_PASS_ROWS_DEFAULT
+    split = cake_backend.ONE_PASS_SPLIT_ROWS_DEFAULT
+    assert {t for t in rows if t > 1} <= split, (sorted(rows), sorted(split))
 
 
 def test_device_one_pass_rule_is_host_only(glm_weight):
     """``_one_pass_call`` decides from host values alone (no synchronization): a cross-entropy call of a row count in
-    ``one_pass_rows()`` with ``H = ONE_PASS_HIDDEN``, one chunk, 16-byte aligned operands, ``backend="cake"``, compacted
-    rows and no explicit GEMM knobs; any other call keeps the chunked path."""
+    ``one_pass_rows()`` (set here: ``{1}``, then ``{1, 2}``) with ``H = ONE_PASS_HIDDEN``, one chunk, 16-byte aligned
+    operands, ``backend="cake"``, compacted rows and no explicit GEMM knobs; any other call keeps the chunked path.  The
+    per-row switch (``one_pass_split_rows``) never changes the answer."""
     _require_one_pass(1)
     inp = _device_inputs(1, "ce", W=glm_weight, ignore_frac=0.0)
     two = _device_inputs(2, "ce", W=glm_weight, ignore_frac=0.0)
@@ -19009,7 +19688,9 @@ def test_device_one_pass_rule_is_host_only(glm_weight):
     torch.cuda.synchronize()
     previous = torch.cuda.get_sync_debug_mode()
     torch.cuda.set_sync_debug_mode("error")
+    stack = contextlib.ExitStack()
     try:
+        stack.enter_context(_one_pass_rows({1}))
         assert call(inp.X, glm_weight, inp.labels, **kw)
         assert call(
             inp.X,
@@ -19026,9 +19707,7 @@ def test_device_one_pass_rule_is_host_only(glm_weight):
             {"chunk_size": 0},
         ):
             assert not call(inp.X, glm_weight, inp.labels, **{**kw, **change}), change
-        assert not call(
-            two.X, glm_weight, two.labels, **kw
-        )  # 2 rows: not in the default set
+        assert not call(two.X, glm_weight, two.labels, **kw)  # 2 rows: not in the set
         assert not call(five.X, glm_weight, five.labels, **kw)
         assert not call(odd, glm_weight, inp.labels, **kw)  # an X base off 16 bytes
         assert not call(
@@ -19039,26 +19718,39 @@ def test_device_one_pass_rule_is_host_only(glm_weight):
             assert not call(inp.X, glm_weight, inp.labels, **kw)
         with _one_pass_rows({1, 2}):
             registered = cake_backend._one_pass_record(torch.cuda.current_device())[2]
-            assert call(two.X, glm_weight, two.labels, **kw) == (2 in registered)
+            for split in ((), {2}):
+                with _one_pass_split_rows(split):
+                    assert call(two.X, glm_weight, two.labels, **kw) == (
+                        2 in registered
+                    )
+                    assert call(inp.X, glm_weight, inp.labels, **kw)
     finally:
+        stack.close()
         torch.cuda.set_sync_debug_mode(previous)
 
 
-@pytest.mark.parametrize("T", [1, 2])
+@pytest.mark.parametrize("T, route", ONE_PASS_ROUTES)
 @pytest.mark.parametrize("train", ["both", "x", "w"])
-def test_device_one_pass_meets_the_naive_tier(glm_weight, record_property, T, train):
-    """A one-pass call (T rows; X and W trainable, X alone, W alone) launches the forward (without the head-row sums
-    when X is frozen), the merge and the backward and holds its contract, as does a second call.  The three trainable
-    sets of one draw and the second call of each meet the naive tier at the production head (``H`` 6144, ``V`` 154880)
-    over the draws (``name@both`` / ``name@x`` / ``name@w``, the second calls ``name@both_again`` / ``name@x_again`` /
-    ``name@w_again``; judged in the ``train="both"`` case), every draw through the one-pass launches."""
-    _require_one_pass(T)
+def test_device_one_pass_meets_the_naive_tier(
+    glm_weight, record_property, T, route, train
+):
+    """A one-pass call (T rows; X and W trainable, X alone, W alone; two rows through the two-row forward program or
+    per row, ``route``) launches the forward (without the head-row sums when X is frozen; per row: the one-row forward
+    and merge per row when X is trainable), the merge and the backward and holds its contract, as does a second call.
+    The three trainable sets of one draw and the second call of each meet the naive tier at the production head (``H``
+    6144, ``V`` 154880) over the draws (``name@both`` / ``name@x`` / ``name@w``, the second calls ``name@both_again`` /
+    ``name@x_again`` / ``name@w_again``; judged in the ``train="both"`` case), every draw through the one-pass
+    launches."""
+    _require_one_pass_route(T, route)
+    split = route == "split"
     inp = _device_inputs(T, "ce", W=glm_weight, ignore_frac=0.0)
     kw = dict(backend="cake", train_x=train != "w", train_w=train != "x")
-    with _one_pass_rows({T}), _one_pass_launches() as launched:
+    with _one_pass_route(T, route), _one_pass_launches() as launched:
         got = _run(inp, 4096, **kw)
         again = _run(inp, 4096, **kw)
-    stages = _one_pass_stages(T, need_dx=train != "w", need_dw=train != "x")
+    stages = _one_pass_stages(
+        T, need_dx=train != "w", need_dw=train != "x", split=split
+    )
     assert launched == stages + stages
     contract_lm_head(got, inp)
     contract_lm_head(again, inp)
@@ -19074,11 +19766,11 @@ def test_device_one_pass_meets_the_naive_tier(glm_weight, record_property, T, tr
     def launch(j, s):
         draw = judge_inputs(T, s, H=GLM_H, V=GLM_V, device=CUDA, ignore_frac=0.0)
         results, want = {}, []
-        with _one_pass_rows({T}), _one_pass_launches() as draw_launched:
+        with _one_pass_route(T, route), _one_pass_launches() as draw_launched:
             for label, (tx, tw) in trains.items():
                 for name in (label, f"{label}_again"):  # the call and a second call
                     results[name] = _run(draw, 4096, backend="cake", train_x=tx, train_w=tw)
-                    want += _one_pass_stages(T, need_dx=tx, need_dw=tw)
+                    want += _one_pass_stages(T, need_dx=tx, need_dw=tw, split=split)
         assert draw_launched == want, (j, draw_launched)
         return [(draw, results)]
 
@@ -19100,14 +19792,26 @@ def _padded_rows(X: torch.Tensor, pad: int = 64) -> torch.Tensor:
     return view
 
 
-@pytest.mark.parametrize("value", ["inf", "nan"])
-def test_device_one_pass_ignored_rows_reach_no_output(glm_weight, record_property, value):
-    """An ignored row of a one-pass call holding ``inf`` / NaN in ``X`` (rows at a padded pitch) gives the bits of the
-    same call with a zero ``X`` row there -- ``loss`` / ``logp`` / ``dX`` / ``dW``, every output finite, the ignored
-    row's ``logp`` and ``dX`` exact zeros -- and the clean call holds its contract.  The clean call (the same in both
-    cases: judged in the ``inf`` one) meets the naive tier at the production head (``H`` 6144, ``V`` 154880) over the
-    draws, every draw through the one-pass launches."""
-    _require_one_pass(2)
+@pytest.mark.parametrize(
+    "value, route",
+    [
+        pytest.param("inf", "kernel", id="inf"),
+        pytest.param("nan", "kernel", id="nan"),
+        pytest.param("inf", "split", id="inf-split"),
+        pytest.param("nan", "split", id="nan-split"),
+    ],
+)
+def test_device_one_pass_ignored_rows_reach_no_output(
+    glm_weight, record_property, value, route
+):
+    """An ignored row of a two-row one-pass call (through the two-row forward program or per row, ``route``) holding
+    ``inf`` / NaN in ``X`` (rows at a padded pitch) gives the bits of the same call with a zero ``X`` row there --
+    ``loss`` / ``logp`` / ``dX`` / ``dW``, every output finite, the ignored row's ``logp`` and ``dX`` exact zeros -- and
+    the clean call holds its contract.  The clean call (the same in both cases: judged in the ``inf`` one) meets the
+    naive tier at the production head (``H`` 6144, ``V`` 154880) over the draws, every draw through the one-pass
+    launches."""
+    _require_one_pass_route(2, route)
+    stages = _one_pass_stages(2, split=route == "split")
     inp = make_inputs(2, seed=SEED + 2, device=CUDA, W=glm_weight, ignore_frac=0.5)
     ignored = inp.labels < 0
     assert int(ignored.sum()) == 1
@@ -19117,10 +19821,10 @@ def test_device_one_pass_ignored_rows_reach_no_output(glm_weight, record_propert
         inp, X=_padded_rows(_non_finite_ignored_rows(inp, float(value)).X)
     )
     assert clean.X.stride(0) == dirty.X.stride(0) == inp.X.shape[1] + 64
-    with _one_pass_rows({2}), _one_pass_launches() as launched:
+    with _one_pass_route(2, route), _one_pass_launches() as launched:
         ref = _run(clean, 4096, backend="cake")
         got = _run(dirty, 4096, backend="cake")
-    assert launched == _one_pass_stages(2) * 2
+    assert launched == stages * 2
     for key in ("loss", "logp", "dX", "dW"):
         assert bool(torch.isfinite(got[key].float()).all()), key
         assert _same_bits(got[key], ref[key]), key
@@ -19137,9 +19841,9 @@ def test_device_one_pass_ignored_rows_reach_no_output(glm_weight, record_propert
         return dataclasses.replace(draw, X=_padded_rows(zeroed))
 
     def clean_call(draw):
-        with _one_pass_rows({2}), _one_pass_launches() as draw_launched:
+        with _one_pass_route(2, route), _one_pass_launches() as draw_launched:
             out = _run(draw, 4096, backend="cake")
-        assert draw_launched == _one_pass_stages(2), draw_launched
+        assert draw_launched == stages, draw_launched
         return out
 
     _judge_device(
@@ -19147,16 +19851,16 @@ def test_device_one_pass_ignored_rows_reach_no_output(glm_weight, record_propert
     )
 
 
-def test_device_one_pass_every_row_ignored(glm_weight):
-    """A one-pass call whose rows are all ignored (NaN in X): zero ``loss`` / ``logp`` / ``dX`` / ``dW``, through the
-    same three launches (the forward streams no W)."""
-    _require_one_pass(1)
+def _one_pass_every_row_ignored_case(glm_weight, T, route):
+    """A one-pass call whose rows are all ignored (NaN in X; one row, or two rows per row): zero ``loss`` / ``logp`` /
+    ``dX`` / ``dW`` and no NaN, through the same launches (the forward streams no W)."""
+    _require_one_pass_route(T, route)
     inp = _non_finite_ignored_rows(
-        _device_inputs(1, "ce", W=glm_weight, ignore_frac=1.0), float("nan")
+        _device_inputs(T, "ce", W=glm_weight, ignore_frac=1.0), float("nan")
     )
-    with _one_pass_launches() as launched:
+    with _one_pass_route(T, route), _one_pass_launches() as launched:
         got = _run(inp, 4096, backend="cake")
-    assert launched == _one_pass_stages(1)
+    assert launched == _one_pass_stages(T, split=route == "split")
     for key in ("loss", "logp", "dX", "dW"):
         assert (
             torch.count_nonzero(got[key]) == 0
@@ -19164,12 +19868,22 @@ def test_device_one_pass_every_row_ignored(glm_weight):
         ), key
 
 
-@pytest.mark.parametrize("T", [1, 2])
-def test_device_one_pass_checkpoint_replay(glm_weight, T):
+def test_device_one_pass_every_row_ignored(glm_weight):
+    """One row (:func:`_one_pass_every_row_ignored_case`)."""
+    _one_pass_every_row_ignored_case(glm_weight, 1, "kernel")
+
+
+def test_device_one_pass_split_every_row_ignored(glm_weight):
+    """Two rows per row (``set_one_pass_split_rows``; :func:`_one_pass_every_row_ignored_case`)."""
+    _one_pass_every_row_ignored_case(glm_weight, 2, "split")
+
+
+@pytest.mark.parametrize("T, route", ONE_PASS_ROUTES)
+def test_device_one_pass_checkpoint_replay(glm_weight, T, route):
     """Under ``torch.utils.checkpoint`` (non-reentrant, gradient placement "auto") the checkpointed forward runs the
-    forward without the head-row sums and the merge, the recomputation the full forward and the merge, the backward
-    once; the step holds its contract."""
-    _require_one_pass(T)
+    forward without the head-row sums and the merge (two rows: the two-row ones on either route), the recomputation the
+    full forward and the merge (per row on the ``split`` route), the backward once; the step holds its contract."""
+    _require_one_pass_route(T, route)
     inp = _device_inputs(T, "ce", W=glm_weight, ignore_frac=0.0)
 
     def head(X, W):
@@ -19179,39 +19893,44 @@ def test_device_one_pass_checkpoint_replay(glm_weight, T):
 
     X = inp.X.detach().requires_grad_(True)
     W = inp.W.detach().requires_grad_(True)
-    with _one_pass_rows({T}):
-        with _one_pass_launches() as launched:
-            loss = torch.utils.checkpoint.checkpoint(head, X, W, use_reentrant=False)
-            loss.backward()
-    fwd, fwd_nodx = cake_backend.ONE_PASS_FWD_STAGES[T]
-    combine, dw = cake_backend.ONE_PASS_COMBINE_STAGE, cake_backend.ONE_PASS_DW_STAGE
-    assert launched == [fwd_nodx, combine, fwd, combine, dw]
+    with _one_pass_route(T, route), _one_pass_launches() as launched:
+        loss = torch.utils.checkpoint.checkpoint(head, X, W, use_reentrant=False)
+        loss.backward()
+    first = _one_pass_stages(T, need_dx=False)[:-1]
+    assert launched == first + _one_pass_stages(T, split=route == "split")
     contract_lm_head(dict(loss=loss.detach(), dX=X.grad, dW=W.grad), inp)
 
 
-def test_device_one_pass_gradient_accumulation_and_retained_graph(glm_weight, record_property):
+def _one_pass_gradient_accumulation_and_retained_graph_case(
+    glm_weight, record_property, T, route
+):
     """Two backward passes into the same ``W`` (the second call with a frozen X: the backward writes ``dW`` alone):
     ``W.grad`` is the autograd engine's sum of the two incoming gradients, each holding its contract; both backward
-    passes of a retained graph hold their contract.  At the production head (``H`` 6144, ``V`` 154880, where the
-    one-pass programs are registered) each draw runs the retained graph through the one-pass launches, and the loss
-    and both backward passes are judged against the naive tier (``name@first``: the loss and the pass that retains
-    the graph; ``name@retained``: the second pass)."""
-    _require_one_pass(1)
-    a = _device_inputs(1, "ce", W=glm_weight, ignore_frac=0.0)
-    b = _device_inputs(1, "ce", W=glm_weight, seed=SEED + 7, ignore_frac=0.0)
+    passes of a retained graph hold their contract (one row, or two rows per row).  At the production head (``H``
+    6144, ``V`` 154880, where the one-pass programs are registered) each draw runs the retained graph through the
+    one-pass launches, and the loss and both backward passes are judged against the naive tier (``name@first``: the
+    loss and the pass that retains the graph; ``name@retained``: the second pass)."""
+    _require_one_pass_route(T, route)
+    split = route == "split"
+    a = _device_inputs(T, "ce", W=glm_weight, ignore_frac=0.0)
+    b = _device_inputs(T, "ce", W=glm_weight, seed=SEED + 7, ignore_frac=0.0)
     X = a.X.detach().requires_grad_(True)
     W = glm_weight.detach().requires_grad_(True)
     seen_w = []
     W.register_hook(lambda g: seen_w.append(g.detach().clone()))
-    for inp in (a, b):
-        loss = cake_backend.cake_lm_head_nondet_train_loss(
-            X if inp is a else inp.X.detach(),
-            W,
-            inp.labels,
-            loss_div=inp.loss_div,
-            chunk_size=4096,
-        )
-        loss.backward()
+    with _one_pass_route(T, route), _one_pass_launches() as launched:
+        for inp in (a, b):
+            loss = cake_backend.cake_lm_head_nondet_train_loss(
+                X if inp is a else inp.X.detach(),
+                W,
+                inp.labels,
+                loss_div=inp.loss_div,
+                chunk_size=4096,
+            )
+            loss.backward()
+    assert launched == _one_pass_stages(T, split=split) + _one_pass_stages(
+        T, need_dx=False, split=split
+    )
     assert len(seen_w) == 2
     assert _same_bits(W.grad, seen_w[0] + seen_w[1])
     contract_lm_head(dict(dX=X.grad, dW=seen_w[0]), a)
@@ -19230,55 +19949,90 @@ def test_device_one_pass_gradient_accumulation_and_retained_graph(glm_weight, re
         results["first"]["loss"] = loss.detach()
         return results
 
-    for result in passes(a).values():
-        contract_lm_head(result, a)
+    with _one_pass_route(T, route):
+        for result in passes(a).values():
+            contract_lm_head(result, a)
     del a, b, X, W
     seen_w.clear()  # the name stays bound: the hook reads it
+    forward = _one_pass_stages(T, split=split)[:-1]
 
     def launch(j, s):
-        draw = judge_inputs(1, s, H=GLM_H, V=GLM_V, device=CUDA, ignore_frac=0.0)
-        with _one_pass_rows({1}), _one_pass_launches() as launched:
+        draw = judge_inputs(T, s, H=GLM_H, V=GLM_V, device=CUDA, ignore_frac=0.0)
+        with _one_pass_route(T, route), _one_pass_launches() as launched:
             results = passes(draw)
-        assert launched[:2] == _one_pass_stages(1)[:2], (j, launched)
+        assert launched[: len(forward)] == forward, (j, launched)
         return [(draw, results)]
 
     _judge_problems(
         record_property,
         launch,
         ("first", "retained"),
-        seed=SEED + 1,
+        seed=SEED + T,
         names={"first": ("loss", "dX", "dW"), "retained": ("dX", "dW")},
     )
 
 
-@pytest.mark.parametrize("ignore_frac", [0.0, 1.0])
-def test_device_one_pass_has_no_host_synchronization(glm_weight, ignore_frac):
-    """A one-pass call (forward and backward of the autograd entry, every row ignored too) synchronizes nothing:
-    PyTorch's synchronization debug mode at ``"error"`` raises nothing."""
-    _require_one_pass(1)
-    inp = _device_inputs(1, "ce", W=glm_weight, ignore_frac=ignore_frac)
+def test_device_one_pass_gradient_accumulation_and_retained_graph(
+    glm_weight, record_property
+):
+    """One row (:func:`_one_pass_gradient_accumulation_and_retained_graph_case`)."""
+    _one_pass_gradient_accumulation_and_retained_graph_case(
+        glm_weight, record_property, 1, "kernel"
+    )
+
+
+def test_device_one_pass_split_gradient_accumulation_and_retained_graph(
+    glm_weight, record_property
+):
+    """Two rows per row (``set_one_pass_split_rows``;
+    :func:`_one_pass_gradient_accumulation_and_retained_graph_case`)."""
+    _one_pass_gradient_accumulation_and_retained_graph_case(
+        glm_weight, record_property, 2, "split"
+    )
+
+
+@pytest.mark.parametrize(
+    "ignore_frac, T, route",
+    [
+        pytest.param(0.0, 1, "kernel", id="0.0"),
+        pytest.param(1.0, 1, "kernel", id="1.0"),
+        pytest.param(0.0, 2, "split", id="0.0-2-split"),
+        pytest.param(1.0, 2, "split", id="1.0-2-split"),
+    ],
+)
+def test_device_one_pass_has_no_host_synchronization(glm_weight, ignore_frac, T, route):
+    """A one-pass call (forward and backward of the autograd entry, every row ignored too; one row, or two rows per
+    row) synchronizes nothing: PyTorch's synchronization debug mode at ``"error"`` raises nothing."""
+    _require_one_pass_route(T, route)
+    inp = _device_inputs(T, "ce", W=glm_weight, ignore_frac=ignore_frac)
     X = inp.X.detach().requires_grad_(True)
     W = inp.W.detach().requires_grad_(True)
-    for _ in range(2):
-        _small_call_step(X, W, inp.labels, "loss", loss_div=inp.loss_div)
-    torch.cuda.synchronize()
-    previous = torch.cuda.get_sync_debug_mode()
-    torch.cuda.set_sync_debug_mode("error")
-    try:
-        with _one_pass_launches() as launched:
+    with _one_pass_route(T, route):
+        for _ in range(2):
             _small_call_step(X, W, inp.labels, "loss", loss_div=inp.loss_div)
-    finally:
-        torch.cuda.set_sync_debug_mode(previous)
-    torch.cuda.synchronize()
-    assert launched == _one_pass_stages(1)
+        torch.cuda.synchronize()
+        previous = torch.cuda.get_sync_debug_mode()
+        torch.cuda.set_sync_debug_mode("error")
+        try:
+            with _one_pass_launches() as launched:
+                _small_call_step(X, W, inp.labels, "loss", loss_div=inp.loss_div)
+        finally:
+            torch.cuda.set_sync_debug_mode(previous)
+        torch.cuda.synchronize()
+    assert launched == _one_pass_stages(T, split=route == "split")
 
 
-def test_device_one_pass_cuda_graph(glm_weight):
-    """A one-pass step (forward and ``torch.autograd.grad``) captured into a CUDA graph (after an eager step) replays
-    and holds its contract, also on new inputs written into the captured ``X`` and ``labels``."""
-    _require_one_pass(1)
-    inp = _device_inputs(1, "ce", W=glm_weight, ignore_frac=0.0)
-    new = _device_inputs(1, "ce", W=glm_weight, seed=SEED + 11, ignore_frac=0.0)
+def _one_pass_cuda_graph_case(glm_weight, T, route):
+    """A one-pass step (forward and ``torch.autograd.grad``; one row, or two rows per row) captured into a CUDA graph
+    (after an eager step) launches the route's stages, replays and holds its contract, also on new inputs written into
+    the captured ``X`` and ``labels``, among them inputs with an ignored row (one row: every row)."""
+    _require_one_pass_route(T, route)
+    inp = _device_inputs(T, "ce", W=glm_weight, ignore_frac=0.0)
+    new = _device_inputs(T, "ce", W=glm_weight, seed=SEED + 11, ignore_frac=0.0)
+    ignored = _device_inputs(
+        T, "ce", W=glm_weight, seed=SEED + 13, ignore_frac=1.0 if T == 1 else 0.5
+    )
+    assert int((ignored.labels < 0).sum()) == 1
     X = inp.X.detach().clone().requires_grad_(True)
     labels = inp.labels.clone()
     W = inp.W.detach().requires_grad_(True)
@@ -19291,39 +20045,51 @@ def test_device_one_pass_cuda_graph(glm_weight):
         return loss.detach(), dx, dw
 
     names = ("loss", "dX", "dW")
-    contract_lm_head(dict(zip(names, step())), inp)
-    side = torch.cuda.Stream()
-    side.wait_stream(torch.cuda.current_stream())
-    with torch.cuda.stream(side):
-        for _ in range(2):
-            step()
-    torch.cuda.current_stream().wait_stream(side)
-    graph = torch.cuda.CUDAGraph()
-    with _one_pass_launches() as launched, torch.cuda.graph(graph):
-        captured = step()
-    assert launched == _one_pass_stages(1)
+    with _one_pass_route(T, route):
+        contract_lm_head(dict(zip(names, step(), strict=True)), inp)
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side):
+            for _ in range(2):
+                step()
+        torch.cuda.current_stream().wait_stream(side)
+        graph = torch.cuda.CUDAGraph()
+        with _one_pass_launches() as launched, torch.cuda.graph(graph):
+            captured = step()
+    assert launched == _one_pass_stages(T, split=route == "split")
     graph.replay()
     torch.cuda.synchronize()
     contract_lm_head(dict(zip(names, captured)), inp)
-    with torch.no_grad():
-        X.copy_(new.X)
-    labels.copy_(new.labels)
-    graph.replay()
-    torch.cuda.synchronize()
-    contract_lm_head(dict(zip(names, captured)), new)
+    for src in (new, ignored):
+        with torch.no_grad():
+            X.copy_(src.X)
+        labels.copy_(src.labels)
+        graph.replay()
+        torch.cuda.synchronize()
+        contract_lm_head(dict(zip(names, captured, strict=True)), src)
+
+
+def test_device_one_pass_cuda_graph(glm_weight):
+    """One row (:func:`_one_pass_cuda_graph_case`)."""
+    _one_pass_cuda_graph_case(glm_weight, 1, "kernel")
+
+
+def test_device_one_pass_split_cuda_graph(glm_weight):
+    """Two rows per row (``set_one_pass_split_rows``; :func:`_one_pass_cuda_graph_case`)."""
+    _one_pass_cuda_graph_case(glm_weight, 2, "split")
 
 
 def test_one_pass_layout_is_the_byte_slices_layout():
     """:func:`cake_backend._one_pass_layout` gives the byte offsets and sizes the one-pass forward's kept block and
     partials had as a list of aligned byte slices: the same block size, piece offsets, second-partials offset and
     partial words, for both row counts, several vocabularies and forward CTA counts (``parts``), with and without
-    dX."""
+    dX (the loss piece of ``T`` rows: the per-row forward keeps every row's loss)."""
     H, align = cake_backend.ONE_PASS_HIDDEN, cake_backend._align
     for T in (1, 2):
         for V in (128, 4096, 151936, 154880):
             for parts in (1, 132, 148, 160, 256):
                 for need_dx in (True, False):
-                    kept = [2 * T * V, 8 * T, 4 * T, 4, 8 * T]
+                    kept = [2 * T * V, 8 * T, 4 * T, 4 * T, 8 * T]
                     if need_dx:
                         kept.append(4 * T * H)
                     offsets, total = [], 0
@@ -19409,14 +20175,17 @@ def test_one_pass_form_scalars_cover_the_plans_and_grids():
         cake_backend._one_pass_form_check(cake_backend.ONE_PASS_COMBINE_STAGE, without)
 
 
-@pytest.mark.parametrize("T", [1, 2])
-def test_device_one_pass_formed_keys_match_eager_form(monkeypatch, glm_weight, T):
+@pytest.mark.parametrize("T, route", ONE_PASS_ROUTES)
+def test_device_one_pass_formed_keys_match_eager_form(
+    monkeypatch, glm_weight, T, route
+):
     """A one-pass launch keys its remembered launch itself (``_EAGER_FORMED`` and the stage's form scalars): over the
     trainable sets, two loss divisors and (2 rows) a padded ``X`` pitch, two launches share a formed key exactly when
     :func:`_eager_form` over their full host values is the same, so the cache keeps one launch per form (the merge's
     ``loss_div`` a per-call slot: one binding for both divisors); a repeated round binds nothing, and every output is
-    bitwise the output with the binding cache disabled."""
-    _require_one_pass(T)
+    bitwise the output with the binding cache disabled.  Per row (``route="split"``) every launch of the forward with
+    dX is a one-row call's form: after a one-row step, a two-row step binds the two-row backward alone."""
+    _require_one_pass_route(T, route)
     calls, binds = [], []
     real_launch, real_bind = cake_backend._one_pass_launch, cake_backend._bind_all
 
@@ -19449,7 +20218,7 @@ def test_device_one_pass_formed_keys_match_eager_form(monkeypatch, glm_weight, T
         torch.cuda.synchronize()
         return out
 
-    with _one_pass_rows({T}):
+    with _one_pass_route(T, route):
         cache.configure(enabled=False)
         fresh = run()
         cache.configure(enabled=True)
@@ -19489,19 +20258,31 @@ def test_device_one_pass_formed_keys_match_eager_form(monkeypatch, glm_weight, T
                 case[1:],
                 key,
             )
+    if route != "split":
+        return
+    cache.clear()
+    one = _device_inputs(1, "ce", W=glm_weight, ignore_frac=0.0)
+    with _one_pass_route(1):
+        _run(one, 4096, backend="cake")
+    binds.clear()
+    with _one_pass_route(T, route):
+        _run(inp, 4096, backend="cake")
+    torch.cuda.synchronize()
+    assert binds == [(cake_backend.ONE_PASS_DW_STAGE,)], binds
 
 
-@pytest.mark.parametrize("T", [1, 2])
-def test_device_one_pass_views_are_the_byte_slices(glm_weight, T):
-    """The one-pass forward's kept views (logits, row results, ``logp``, loss, labels, dX accumulator) are the views
-    the aligned byte slices of its uint8 block and their dtype views are: the same address, shape, stride and dtype,
-    all in the one storage of the block, with and without dX."""
-    _require_one_pass(T)
+@pytest.mark.parametrize("T, route", ONE_PASS_ROUTES)
+def test_device_one_pass_views_are_the_byte_slices(glm_weight, T, route):
+    """The one-pass forward's kept views (logits, row results, ``logp``, loss -- the first of the loss piece's ``T``
+    words --, labels, dX accumulator) are the views the aligned byte slices of its uint8 block and their dtype views
+    are: the same address, shape, stride and dtype, all in the one storage of the block, with and without dX (on both
+    two-row routes)."""
+    _require_one_pass_route(T, route)
     inp = _device_inputs(T, "ce", W=glm_weight, ignore_frac=0.0)
     H, V = int(inp.X.shape[1]), int(inp.W.shape[0])
     f32 = torch.float32
     for need_dx in (True, False):
-        with torch.no_grad():
+        with torch.no_grad(), _one_pass_route(T, route):
             fr = cake_backend._one_pass_forward(
                 inp.X,
                 inp.W,
@@ -19519,7 +20300,7 @@ def test_device_one_pass_views_are_the_byte_slices(glm_weight, T):
             (2 * T * V, torch.bfloat16, Z),
             (8 * T, f32, ROWS),
             (4 * T, f32, fr.logp),
-            (4, f32, fr.loss),
+            (4 * T, f32, fr.loss),
             (8 * T, torch.int64, LAB),
         ]
         if need_dx:
@@ -19530,7 +20311,7 @@ def test_device_one_pass_views_are_the_byte_slices(glm_weight, T):
         for nbytes, dtype, got in pieces:
             want = block[offset : offset + nbytes].view(dtype)
             if got is fr.loss:
-                want = want.view(())
+                want = want[:1].view(())
             assert (got.data_ptr(), got.shape, got.stride(), got.dtype) == (
                 want.data_ptr(),
                 want.shape,
@@ -19698,54 +20479,73 @@ def _one_pass_hooked_step(inp, kind):
 
 
 @pytest.mark.parametrize("kind", ONE_PASS_HOOKED_KINDS)
-@pytest.mark.parametrize("T", [1, 2])
-def test_device_one_pass_hooked_steps_match_the_plain_step(glm_weight, T, kind):
+@pytest.mark.parametrize("T, route", ONE_PASS_ROUTES)
+def test_device_one_pass_hooked_steps_match_the_plain_step(glm_weight, T, route, kind):
     """A one-pass step under saved-tensor hooks or a checkpoint (:func:`_one_pass_hooked_step`; 2 rows: ``X`` at a
     padded pitch, which the offload hooks give back contiguous, so that backward's ``one_pass_dw`` reads ``X`` at
-    pitch ``H`` where the plain step's reads it at ``H + 64``) gives the plain step's ``loss``, ``logp``, ``dX`` and
-    ``dW`` bit for bit.  Outside the split checkpoint path a pass takes the entry's own one-pass answer straight to
-    the one-pass forward (``checked``, :func:`_one_pass_routes`): the offload hooks run the plain step's three
-    launches; a non-reentrant checkpoint under the placement ``"forward"`` or torch's deterministic algorithms (a
-    selective one under ``"forward"`` too) runs the full forward and the merge in both passes, then the backward.  A
-    pass that leaves the gradients to the recomputation runs the forward without the head-row sums first: a selective
-    checkpoint under ``"auto"`` (the split path: both passes through :func:`cake_backend._loss_forward`) and the
-    reentrant checkpoint (its first pass, without a graph, through ``_loss_forward``; its recomputation straight)."""
-    _require_one_pass(T)
+    pitch ``H`` where the plain step's reads it at ``H + 64``; through the two-row forward program or per row,
+    ``route``) gives the plain step's ``loss``, ``logp``, ``dX`` and ``dW`` bit for bit.  Outside the split checkpoint
+    path a pass takes the entry's own one-pass answer straight to the one-pass forward (``checked``,
+    :func:`_one_pass_routes`): the offload hooks run the plain step's launches; a non-reentrant checkpoint under the
+    placement ``"forward"`` or torch's deterministic algorithms (a selective one under ``"forward"`` too) runs the full
+    forward and the merge in both passes, then the backward.  A pass that leaves the gradients to the recomputation
+    runs the forward without the head-row sums first: a selective checkpoint under ``"auto"`` (the split path: both
+    passes through :func:`cake_backend._loss_forward`) and the reentrant checkpoint (its first pass, without a graph,
+    through ``_loss_forward``; its recomputation straight).  Per row those two return the loss and ``logp`` of their
+    first pass -- the forward without the head-row sums and the two-row merge, bitwise a ``torch.no_grad`` call's --
+    and the plain step's ``dX`` and ``dW``."""
+    _require_one_pass_route(T, route)
+    split = route == "split"
     inp = _device_inputs(T, "ce", W=glm_weight, ignore_frac=0.0)
     H = int(inp.X.shape[1])
     if T > 1:
         inp = dataclasses.replace(inp, X=_padded_rows(inp.X))
         assert inp.X.stride(0) == H + 64
-    with _one_pass_rows({T}):
+    with _one_pass_route(T, route):
         plain, plain_launched, plain_routes, _ = _one_pass_hooked_step(inp, "plain")
         got, launched, (checked, ldx), packed = _one_pass_hooked_step(inp, kind)
-    fwd, fwd_nodx = cake_backend.ONE_PASS_FWD_STAGES[T]
-    combine, dw = cake_backend.ONE_PASS_COMBINE_STAGE, cake_backend.ONE_PASS_DW_STAGE
-    assert plain_launched == [fwd, combine, dw]
+        with torch.no_grad():
+            nog_loss, nog_logp = cake_backend.cake_lm_head_nondet_train_loss(
+                inp.X,
+                inp.W,
+                inp.labels,
+                loss_div=inp.loss_div,
+                chunk_size=4096,
+                return_logp=True,
+            )
+    full = _one_pass_stages(T, split=split)
+    fwd_part = full[:-1]
+    nodx_part = _one_pass_stages(T, need_dx=False)[:-1]
+    assert plain_launched == full
     # the plain step's dW launch reads X at its own pitch
     assert plain_routes == ([True], [H + 64 if T > 1 else H]), plain_routes
     if kind == "offload":
         assert packed, "the offload hooks packed no tensor"
         # the backward unpacks a contiguous copy of X
         assert ldx == [H], ldx
-        want, direct = [fwd, combine, dw], [True]
+        want, direct = full, [True]
     elif kind == "selective":
-        want, direct = [fwd_nodx, combine, fwd, combine, dw], [False, False]
+        want, direct = nodx_part + full, [False, False]
     elif kind == "reentrant":
-        want, direct = [fwd_nodx, combine, fwd, combine, dw], [False, True]
+        want, direct = nodx_part + full, [False, True]
     else:
-        want, direct = [fwd, combine, fwd, combine, dw], [True, True]
+        want, direct = fwd_part + full, [True, True]
     assert launched == want, (kind, launched)
     assert checked == direct, (kind, checked)
+    if split and kind in ("selective", "reentrant"):
+        # the first pass's loss and logp (the two-row merge), the recomputation's gradients
+        _assert_step_bits(got, plain, keys=("dX", "dW"))
+        assert _same_bits(got["loss"], nog_loss) and _same_bits(got["logp"], nog_logp)
+        return
     _assert_step_bits(got, plain)
 
 
-def test_device_one_pass_on_a_non_current_device(monkeypatch, glm_weight):
-    """A one-pass call whose ``X``, ``W`` and ``labels`` are on ``cuda:1`` while the current device is 0 launches with
-    device index 1: next to the same call on device 0, each one-pass form binds once per device (the remembered forms
-    keyed by index 0 and 1), a repeated round binds nothing, the current device stays 0, and every output is bitwise
-    the output with the binding cache disabled."""
-    _require_one_pass(1)
+def _one_pass_on_a_non_current_device_case(monkeypatch, glm_weight, T, route):
+    """A one-pass call (one row, or two rows per row) whose ``X``, ``W`` and ``labels`` are on ``cuda:1`` while the
+    current device is 0 launches with device index 1: next to the same call on device 0, each one-pass form binds once
+    per device (the remembered forms keyed by index 0 and 1), a repeated round binds nothing, the current device stays
+    0, and every output is bitwise the output with the binding cache disabled."""
+    _require_one_pass_route(T, route)
     if torch.cuda.device_count() < 2:
         pytest.skip("requires two CUDA devices")
     for index in (0, 1):
@@ -19753,9 +20553,11 @@ def test_device_one_pass_on_a_non_current_device(monkeypatch, glm_weight):
             not cake_backend.generated_program_available(
                 torch.device("cuda", index), entry="loss"
             )
-            or 1 not in cake_backend._one_pass_record(index)[2]
+            or not {1, T} <= cake_backend._one_pass_record(index)[2]
         ):
-            pytest.skip(f"device {index} registers no one-pass programs of 1 row")
+            pytest.skip(
+                f"device {index} registers no one-pass programs of 1 and {T} rows"
+            )
     calls, binds = [], []
     real_launch, real_bind = cake_backend._one_pass_launch, cake_backend._bind_all
 
@@ -19772,14 +20574,14 @@ def test_device_one_pass_on_a_non_current_device(monkeypatch, glm_weight):
     cache = cake_backend.BindingCache()
     monkeypatch.setattr(cake_backend, "BINDING_CACHE", cache)
     zero, one = torch.device("cuda", 0), torch.device("cuda", 1)
-    inp = _device_inputs(1, "ce", W=glm_weight, ignore_frac=0.0)
+    inp = _device_inputs(T, "ce", W=glm_weight, ignore_frac=0.0)
     near, far = (
         dataclasses.replace(
             inp, X=inp.X.to(dev), W=inp.W.to(dev), labels=inp.labels.to(dev)
         )
         for dev in (zero, one)
     )
-    stages = _one_pass_stages(1)
+    stages = _one_pass_stages(T, split=route == "split")
 
     def run():
         out = [_run(draw, 4096, backend="cake") for draw in (far, near)]
@@ -19787,7 +20589,7 @@ def test_device_one_pass_on_a_non_current_device(monkeypatch, glm_weight):
         torch.cuda.synchronize(zero)
         return out
 
-    with torch.cuda.device(zero), _one_pass_rows({1}):
+    with torch.cuda.device(zero), _one_pass_route(T, route):
         cache.configure(enabled=False)
         fresh = run()
         cache.configure(enabled=True)
@@ -19796,7 +20598,8 @@ def test_device_one_pass_on_a_non_current_device(monkeypatch, glm_weight):
         first = run()
         assert torch.cuda.current_device() == 0
         assert calls == [(s, 1, one) for s in stages] + [(s, 0, zero) for s in stages]
-        assert sorted(binds) == sorted((s, i) for s in stages for i in (0, 1))
+        # one binding per form and device (per row: the rows share the one-row forms)
+        assert sorted(binds) == sorted((s, i) for s in set(stages) for i in (0, 1))
         assert sorted((form[2], form[3]) for form in cache._eager) == sorted(binds)
         binds.clear()
         again = run()
@@ -19807,6 +20610,830 @@ def test_device_one_pass_on_a_non_current_device(monkeypatch, glm_weight):
             assert _same_bits(a[key], b[key]) and _same_bits(a[key], c[key]), key
     for out in (first[0], again[0]):
         assert all(out[key].device == one for key in ("loss", "logp", "dX", "dW"))
+
+
+def test_device_one_pass_on_a_non_current_device(monkeypatch, glm_weight):
+    """One row (:func:`_one_pass_on_a_non_current_device_case`)."""
+    _one_pass_on_a_non_current_device_case(monkeypatch, glm_weight, 1, "kernel")
+
+
+def test_device_one_pass_split_on_a_non_current_device(monkeypatch, glm_weight):
+    """Two rows per row (``set_one_pass_split_rows``; :func:`_one_pass_on_a_non_current_device_case`)."""
+    _one_pass_on_a_non_current_device_case(monkeypatch, glm_weight, 2, "split")
+
+
+@pytest.mark.parametrize("pitch", [0, 64])
+@pytest.mark.parametrize("ignore_frac", [0.0, 0.5])
+def test_device_one_pass_split_rows_are_the_one_row_calls(
+    glm_weight, ignore_frac, pitch
+):
+    """A two-row one-pass call per row (``set_one_pass_split_rows``; no ignored row or one, ``X`` at pitch ``H`` or
+    ``H + 64``) is its rows' one-row calls: row ``t``'s ``logp`` and ``dX`` are bitwise the one-row call's on ``X[t]``,
+    ``labels[t]`` with the same ``loss_div``, and its ``loss`` is bitwise the FP32 sum of the two one-row losses in row
+    order (the same programs on the same operands, and one add)."""
+    _require_one_pass_route(2, "split")
+    inp = make_inputs(
+        2, seed=SEED + 21, device=CUDA, W=glm_weight, ignore_frac=ignore_frac
+    )
+    assert int((inp.labels < 0).sum()) == round(2 * ignore_frac)
+    if pitch:
+        inp = dataclasses.replace(inp, X=_padded_rows(inp.X, pitch))
+    with _one_pass_route(2, "split"), _one_pass_launches() as launched:
+        got = _run(inp, 4096, backend="cake")
+    assert launched == _one_pass_stages(2, split=True)
+    contract_lm_head(got, inp)
+    rows = []
+    with _one_pass_route(1):
+        for t in range(2):
+            row = dataclasses.replace(
+                inp, X=inp.X[t : t + 1], labels=inp.labels[t : t + 1]
+            )
+            rows.append(_run(row, 4096, backend="cake"))
+    for t, row in enumerate(rows):
+        assert _same_bits(got["logp"][t : t + 1], row["logp"]), t
+        assert _same_bits(got["dX"][t : t + 1], row["dX"]), t
+    assert _same_bits(got["loss"], rows[0]["loss"] + rows[1]["loss"])
+
+
+def test_device_one_pass_split_opt_in_delegation(glm_weight):
+    """The opt-in module's fast form (``memory_mode`` ``"fast"``, no ``num_valid_rows``) delegates a two-row
+    cross-entropy call to the main entry, which runs it per row (``set_one_pass_split_rows``) and holds its contract;
+    a call with ``num_valid_rows`` or ``memory_mode="budget"`` launches no one-pass stage."""
+    _require_one_pass_route(2, "split")
+    inp = _device_inputs(2, "ce", W=glm_weight, ignore_frac=0.0)
+    with _one_pass_route(2, "split"):
+        with _one_pass_launches() as fast:
+            got = _run(inp, 4096, backend="cake", memory_mode="fast")
+        with _one_pass_launches() as counted:
+            _run(inp, 4096, backend="cake", num_valid_rows=int(inp.valid.sum()))
+        with _one_pass_launches() as budget:
+            _run(inp, 4096, backend="cake", memory_mode="budget")
+    assert fast == _one_pass_stages(2, split=True)
+    contract_lm_head(got, inp)
+    assert counted == [] and budget == [], (counted, budget)
+
+
+def test_device_one_pass_split_skips_small_call_staging(glm_weight, monkeypatch):
+    """A two-row one-pass call (``one_pass_rows`` ``{1, 2}``, per row) stages nothing (no ``_SmallCallStage``); with
+    ``one_pass_rows`` ``{1}`` the same call stages ``small_pad_rows("loss", device, 2)`` rows (the small-call rule,
+    256 on sm_107a)."""
+    _require_one_pass_route(2, "split")
+    inp = _device_inputs(2, "ce", W=glm_weight, ignore_frac=0.0)
+    seen = []
+    apply = cake_backend._SmallCallStage.apply
+
+    def spy(X, labels, rows, *rest):
+        seen.append(int(rows))
+        return apply(X, labels, rows, *rest)
+
+    monkeypatch.setattr(cake_backend._SmallCallStage, "apply", spy)
+    with _small_pad_rows(None), _one_pass_split_rows({2}):
+        with _one_pass_rows({1, 2}), _one_pass_launches() as launched:
+            _run(inp, 4096, backend="cake")
+        assert seen == [] and launched == _one_pass_stages(2, split=True), (
+            seen,
+            launched,
+        )
+        with _one_pass_rows({1}), _one_pass_launches() as launched:
+            _run(inp, 4096, backend="cake")
+        assert launched == []
+        assert seen == [cake_backend.small_pad_rows("loss", inp.X.device, 2)], seen
+
+
+# ---------------------------------------------------------------------------
+# One-pass log-probability call (set_logprob_one_pass): a one-row call of the log-probability entry that the one-pass
+# rule takes runs the one-pass forward, merge (divisor -1) and backward with the masked dlogp as the upstream scalar
+# ---------------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _logprob_one_pass(on: bool):
+    previous = cake_backend.set_logprob_one_pass(on)
+    try:
+        yield
+    finally:
+        cake_backend.set_logprob_one_pass(previous)
+
+
+def test_logprob_one_pass_switch_validates_and_restores():
+    """``set_logprob_one_pass`` takes a bool and returns the previous value; the default is
+    ``LOGPROB_ONE_PASS_DEFAULT`` (compared with the constant: the A/B decides it); the loss entry's
+    ``set_one_pass_rows`` leaves it alone; the route's rows are one row."""
+    default = cake_backend.LOGPROB_ONE_PASS_DEFAULT
+    assert isinstance(default, bool) and cake_backend.logprob_one_pass() is default
+    for bad in (1, 0, "1", None):
+        with pytest.raises(ValueError):
+            cake_backend.set_logprob_one_pass(bad)
+    assert cake_backend.logprob_one_pass() is default
+    assert cake_backend.set_logprob_one_pass(not default) is default
+    with _one_pass_rows(()):
+        assert cake_backend.logprob_one_pass() is (not default)
+    assert cake_backend.set_logprob_one_pass(default) is (not default)
+    assert cake_backend.logprob_one_pass() is default
+    assert cake_backend.LOGPROB_ONE_PASS_ROWS == frozenset({1})
+
+
+def test_logprob_one_pass_scale_masks_ignored_rows():
+    """``_logprob_one_pass_scale``: the upstream scalar of the one-pass log-probability backward is ``dlogp``'s FP32
+    bits on a valid row (NaN, infinities and ``-0`` included; another dtype or a 0-dim ``dlogp`` converted) and ``+0``
+    on an ignored row whatever ``dlogp`` holds there (host tensors)."""
+    scale = cake_backend._logprob_one_pass_scale
+    for value in (-1.0, 0.37, -0.0, float("nan"), float("inf")):
+        dlogp = torch.tensor([value], dtype=torch.float32)
+        got = scale(torch.tensor([7]), dlogp)
+        assert got.dtype == torch.float32 and tuple(got.shape) == (1,), value
+        assert _same_bits(got, dlogp), value
+    for value in (float("nan"), float("inf"), float("-inf"), -0.0, 2.0):
+        got = scale(torch.tensor([cake_backend.IGNORE_INDEX]), torch.tensor([value]))
+        assert _same_bits(got, torch.zeros(1)), value
+    got = scale(torch.tensor([3]), torch.tensor(0.5, dtype=torch.float64))
+    assert _same_bits(got, torch.tensor([0.5]))
+
+
+def test_logprob_one_pass_rule_is_false_off_device(monkeypatch):
+    """``_logprob_one_pass_call`` answers ``False`` for host tensors and the reference backend with the switch on, and
+    with the switch off before it reads any argument."""
+    H = cake_backend.ONE_PASS_HIDDEN
+    X = torch.zeros((1, H), dtype=torch.bfloat16)
+    W = torch.zeros((256, H), dtype=torch.bfloat16)
+    labels = torch.zeros((1,), dtype=torch.int64)
+    kw = {
+        "chunk_size": 4096,
+        "backend": "cake",
+        "compact_rows": None,
+        "dw_stream": None,
+        "gemm_tuning": None,
+    }
+    rule = cake_backend._logprob_one_pass_call
+    with _logprob_one_pass(True):
+        assert not rule(X, W, labels, **kw)
+        assert not rule(X, W, labels, **{**kw, "backend": "reference"})
+
+    def never(*args, **kwargs):
+        raise AssertionError("the switch off reads no argument")
+
+    monkeypatch.setattr(cake_backend, "_one_pass_call", never)
+    monkeypatch.setattr(cake_backend, "dw_stream_mode", never)
+    with _logprob_one_pass(False):
+        assert not rule(None, None, None, **kw)
+
+
+def test_logprob_entry_checks_one_pass_before_staging(monkeypatch):
+    """The log-probability entry asks the one-pass rule before the small-call rule: a call the rule takes (patched
+    here) runs :func:`cake_backend._one_pass_forward` with ``logprob`` (a stand-in on host tensors) and never the
+    small-call staging -- through the autograd Function, with dX / dW as the inputs require, where a backward can
+    follow, and without an autograd node (no dX, no dW) under ``torch.no_grad``."""
+    H, V = cake_backend.ONE_PASS_HIDDEN, 256
+    seen = []
+
+    def stand_in(X, W, labels, **kwargs):
+        seen.append(kwargs)
+        T = int(X.shape[0])
+        state = (
+            torch.zeros((T * V,), dtype=torch.bfloat16),
+            torch.zeros((2 * T,)),
+            torch.zeros((T,), dtype=torch.int64),
+            torch.zeros((T * H,)) if kwargs["need_dx"] else None,
+        )
+        meta = (
+            T,
+            V,
+            kwargs["need_dx"],
+            kwargs["need_dw"],
+            X.device,
+            0,
+            "stand-in",
+            {},
+            0,
+            0,
+        )
+        return SimpleNamespace(logp=torch.zeros((T,)), one_pass=state + meta)
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("a one-pass call stages nothing")
+
+    monkeypatch.setattr(
+        cake_backend, "_logprob_one_pass_call", lambda *args, **kwargs: True
+    )
+    monkeypatch.setattr(cake_backend, "_one_pass_forward", stand_in)
+    monkeypatch.setattr(cake_backend, "_small_call_rows", refuse)
+    monkeypatch.setattr(cake_backend._SmallCallStage, "apply", refuse)
+    labels = torch.zeros((1,), dtype=torch.int64)
+    for tx, tw in ((True, True), (True, False), (False, True)):
+        X = torch.zeros((1, H), dtype=torch.bfloat16, requires_grad=tx)
+        W = torch.zeros((V, H), dtype=torch.bfloat16, requires_grad=tw)
+        logp = cake_backend.cake_lm_head_nondet_train_logprob(X, W, labels)
+        assert type(logp.grad_fn).__name__.startswith(
+            "CakeLMHeadNondetLogprobFunction"
+        ), (tx, tw)
+        assert seen[-1]["logprob"] and seen[-1]["checked"], seen[-1]
+        assert (seen[-1]["need_dx"], seen[-1]["need_dw"]) == (tx, tw)
+    with torch.no_grad():
+        logp = cake_backend.cake_lm_head_nondet_train_logprob(X, W, labels)
+    assert logp.grad_fn is None
+    assert seen[-1]["logprob"] and not seen[-1]["need_dx"] and not seen[-1]["need_dw"]
+
+
+def test_device_logprob_one_pass_rule_is_host_only(glm_weight):
+    """``_logprob_one_pass_call`` decides from host values alone (no synchronization): with the switch on, a one-row
+    call that the loss entry's one-pass rule would take as a cross-entropy call (``H = ONE_PASS_HIDDEN``, one chunk,
+    16-byte aligned operands, ``backend="cake"``, compacted rows, no explicit GEMM knobs) and a valid ``dw_stream`` --
+    whatever ``one_pass_rows()`` holds; any other call, and every call with the switch off, keeps the chunked path."""
+    _require_one_pass(1)
+    inp = _device_inputs(1, "ce", W=glm_weight, ignore_frac=0.0)
+    two = _device_inputs(2, "ce", W=glm_weight, ignore_frac=0.0)
+    H = int(inp.X.shape[1])
+    odd = torch.empty((H + 8,), dtype=torch.bfloat16, device=CUDA)[1 : H + 1].view(1, H)
+    narrow = torch.empty((256, H - 256), dtype=torch.bfloat16, device=CUDA)
+    host = (inp.X.cpu(), torch.zeros((256, H), dtype=torch.bfloat16), inp.labels.cpu())
+    kw = {
+        "chunk_size": 4096,
+        "backend": "cake",
+        "compact_rows": None,
+        "dw_stream": None,
+        "gemm_tuning": None,
+    }
+    rule = cake_backend._logprob_one_pass_call
+    torch.cuda.synchronize()
+    previous = torch.cuda.get_sync_debug_mode()
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        with _logprob_one_pass(True):
+            assert rule(inp.X, glm_weight, inp.labels, **kw)
+            assert rule(
+                inp.X,
+                glm_weight,
+                inp.labels,
+                **{**kw, "compact_rows": True, "gemm_tuning": {}, "dw_stream": "auto"},
+            )
+            for rows in ((), {2}, {1, 2}):
+                with _one_pass_rows(rows):
+                    assert rule(inp.X, glm_weight, inp.labels, **kw), rows
+            for change in (
+                {"backend": "reference"},
+                {"compact_rows": False},
+                {"gemm_tuning": {"dx": {"k_slices": 1}}},
+                {"chunk_size": 0},
+                {"dw_stream": "bad"},
+            ):
+                assert not rule(inp.X, glm_weight, inp.labels, **{**kw, **change}), (
+                    change
+                )
+            assert not rule(two.X, glm_weight, two.labels, **kw)  # two rows
+            assert not rule(odd, glm_weight, inp.labels, **kw)  # an X base off 16 bytes
+            assert not rule(
+                inp.X[:, : H - 256], narrow, inp.labels, **kw
+            )  # another hidden size
+            assert not rule(*host, **kw)
+        with _logprob_one_pass(False):
+            assert not rule(inp.X, glm_weight, inp.labels, **kw)
+    finally:
+        torch.cuda.set_sync_debug_mode(previous)
+
+
+@pytest.mark.parametrize("train", ["both", "x", "w"])
+def test_device_logprob_one_pass_meets_the_naive_tier(
+    glm_weight, record_property, train
+):
+    """A one-row log-probability call on the one-pass route (X and W trainable, X alone, W alone) launches the forward
+    (without the head-row sums when X is frozen), the merge and the backward and holds its contract, as does a second
+    call.  The three trainable sets of one draw and the second call of each meet the naive tier at the production head
+    (``H`` 6144, ``V`` 154880) over the draws (``name@both`` / ``name@x`` / ``name@w``, the second calls
+    ``name@both_again`` / ``name@x_again`` / ``name@w_again``; judged in the ``train="both"`` case), every draw through
+    the one-pass launches."""
+    _require_one_pass(1)
+    inp = _device_inputs(1, "ce", W=glm_weight, ignore_frac=0.0)
+    tx, tw = train != "w", train != "x"
+    kw = {"entry": "logprob", "backend": "cake", "train_x": tx, "train_w": tw}
+    with _logprob_one_pass(True), _one_pass_launches() as launched:
+        got = _run(inp, 4096, **kw)
+        again = _run(inp, 4096, **kw)
+    stages = _one_pass_stages(1, need_dx=tx, need_dw=tw)
+    assert launched == stages + stages
+    contract_lm_head(got, inp, entry="logprob")
+    contract_lm_head(again, inp, entry="logprob")
+    if train != "both":
+        return
+    trains = {"both": (True, True), "x": (True, False), "w": (False, True)}
+    judged = {"both": ("logp", "dX", "dW"), "x": ("logp", "dX"), "w": ("logp", "dW")}
+
+    def launch(j, s):
+        draw = judge_inputs(1, s, H=GLM_H, V=GLM_V, device=CUDA, ignore_frac=0.0)
+        results, want = {}, []
+        with _logprob_one_pass(True), _one_pass_launches() as draw_launched:
+            for label, (x, w) in trains.items():
+                for name in (label, f"{label}_again"):  # the call and a second call
+                    results[name] = _run(
+                        draw,
+                        4096,
+                        entry="logprob",
+                        backend="cake",
+                        train_x=x,
+                        train_w=w,
+                    )
+                    want += _one_pass_stages(1, need_dx=x, need_dw=w)
+        assert draw_launched == want, (j, draw_launched)
+        return [(draw, results)]
+
+    _judge_problems(
+        record_property,
+        launch,
+        [name for label in trains for name in (label, f"{label}_again")],
+        seed=SEED + 101,
+        entry="logprob",
+        names={
+            **judged,
+            **{f"{label}_again": names for label, names in judged.items()},
+        },
+    )
+
+
+@pytest.mark.parametrize("s", [1.0, 0.37, 3.0])
+def test_device_logprob_one_pass_is_the_loss_one_pass(glm_weight, s):
+    """The gradient identity of the route: a one-row log-probability call's ``logp`` is bitwise the loss entry's
+    one-pass ``logp`` (``loss_div`` 1), and its ``dX`` / ``dW`` with ``dlogp = -s`` are bitwise the loss entry's for
+    ``(loss * s).backward()`` -- the same programs, the merge's ``d`` and the upstream scalar both negated (exact)."""
+    _require_one_pass(1)
+    inp = dataclasses.replace(
+        _device_inputs(1, "ce", W=glm_weight, ignore_frac=0.0), loss_div=1.0
+    )
+    lp_inp = dataclasses.replace(
+        inp, dlogp=torch.full((1,), -s, dtype=torch.float32, device=CUDA)
+    )
+    with _one_pass_rows({1}), _logprob_one_pass(True), _one_pass_launches() as launched:
+        loss = _run(inp, 4096, backend="cake", scale=s)
+        lp = _run(lp_inp, 4096, entry="logprob", backend="cake")
+    assert launched == _one_pass_stages(1) * 2
+    for key in ("logp", "dX", "dW"):
+        assert _same_bits(lp[key], loss[key]), key
+
+
+@pytest.mark.parametrize("dlogp", ["1", "nan", "inf"])
+@pytest.mark.parametrize("value", ["inf", "nan"])
+def test_device_logprob_one_pass_ignored_row(glm_weight, value, dlogp):
+    """A one-row log-probability call whose row is ignored, with ``inf`` / NaN in ``X`` and ``1`` / NaN / ``inf`` as
+    ``dlogp``: ``logp``, ``dX`` and ``dW`` are ``+0`` bits (finite), the values of the chunked call on a finite row
+    (the switch off), through the one-pass launches (the forward streams no ``W``; the masked upstream scalar keeps
+    the incoming value out)."""
+    _require_one_pass(1)
+    inp = _device_inputs(1, "ce", W=glm_weight, ignore_frac=1.0)
+    assert int(inp.labels[0]) < 0
+    dirty = dataclasses.replace(
+        inp,
+        X=torch.full_like(inp.X, float(value)),
+        dlogp=torch.full((1,), float(dlogp), dtype=torch.float32, device=CUDA),
+    )
+    with _logprob_one_pass(True), _one_pass_launches() as launched:
+        got = _run(dirty, 4096, entry="logprob", backend="cake")
+    assert launched == _one_pass_stages(1)
+    with _logprob_one_pass(False):
+        ref = _run(inp, 4096, entry="logprob", backend="cake")
+    for key in ("logp", "dX", "dW"):
+        assert bool(torch.isfinite(got[key].float()).all()), key
+        assert _same_bits(got[key], torch.zeros_like(got[key])), key
+        assert torch.equal(got[key], ref[key]), key
+
+
+@pytest.mark.parametrize("mode", ["no_grad", "inference_mode", "frozen"])
+def test_device_logprob_one_pass_no_grad_forward(glm_weight, mode):
+    """A one-row log-probability call that no backward can follow (``torch.no_grad``, ``torch.inference_mode``, no
+    input requiring a gradient) runs the forward without the head-row sums and the merge, makes no autograd node and
+    gives the ``logp`` bits of the call with a backward."""
+    _require_one_pass(1)
+    inp = _device_inputs(1, "ce", W=glm_weight, ignore_frac=0.0)
+    scope = {
+        "no_grad": torch.no_grad,
+        "inference_mode": torch.inference_mode,
+        "frozen": contextlib.nullcontext,
+    }[mode]
+    with _logprob_one_pass(True):
+        with _one_pass_launches() as launched, scope():
+            logp = cake_backend.cake_lm_head_nondet_train_logprob(
+                inp.X.detach(), inp.W.detach(), inp.labels, chunk_size=4096
+            )
+        torch.cuda.synchronize()
+        grad = _run(inp, 4096, entry="logprob", backend="cake")
+    assert launched == _one_pass_stages(1, need_dx=False)[:-1]
+    assert logp.grad_fn is None
+    assert _same_bits(logp, grad["logp"])
+
+
+# The checkpoint and saved-tensor hook kinds of a one-pass log-probability step (:func:`_checkpointed` kinds, plus
+# ``placement_forward``, ``modified``, ``offload`` and ``deterministic``)
+LOGPROB_ONE_PASS_CHECKPOINT_KINDS = (
+    "nonreentrant",
+    "reentrant",
+    "placement_forward",
+    "selective",
+    "selective_save_all",
+    "modified",
+    "offload",
+    "offload_inside",
+    "offload_outside",
+    "copies_outside",
+    "deterministic",
+)
+
+
+@pytest.mark.parametrize("kind", LOGPROB_ONE_PASS_CHECKPOINT_KINDS)
+def test_device_logprob_one_pass_checkpoint(glm_weight, kind):
+    """A one-row log-probability step under ``torch.utils.checkpoint`` or saved-tensor hooks: non-reentrant (placement
+    ``"auto"``; also a selective checkpoint that recomputes or saves every operator, and under torch's deterministic
+    algorithms, which raise no alert) -- the checkpointed forward keeps its one-pass state in the frame and the
+    recomputation launches nothing (the forward, the merge, the backward); reentrant -- the forward without the
+    head-row sums first, then the recomputation's full forward; placement ``"forward"``, a ``logp`` modified in place
+    before the recomputation, or a checkpoint inside ``save_on_cpu`` / copying hooks (the recomputation gets copies of
+    ``X`` and ``W``) -- the full forward in both passes; CPU offload hooks on top (no checkpoint, or inside the
+    checkpointed function: nothing is recomputed) -- the plain step's launches, the backward reading the kept state
+    back from the host.  ``dX`` / ``dW`` are bitwise the plain step's (under the same placement or deterministic
+    setting)."""
+    _require_one_pass(1)
+    inp = _device_inputs(1, "ce", W=glm_weight, ignore_frac=0.0)
+    fwd, nodx = cake_backend.ONE_PASS_FWD_STAGES[1]
+    combine, dw = cake_backend.ONE_PASS_COMBINE_STAGE, cake_backend.ONE_PASS_DW_STAGE
+    modify = kind == "modified"
+
+    def step(ckpt_kind):
+        X = inp.X.detach().requires_grad_(True)
+        W = inp.W.detach().requires_grad_(True)
+
+        def head(a, b):
+            lp = cake_backend.cake_lm_head_nondet_train_logprob(
+                a, b, inp.labels, chunk_size=4096
+            )
+            if modify:
+                lp.mul_(1.0)  # in place: the kept logp's version changes
+            return (lp * inp.dlogp).sum()
+
+        with _one_pass_launches() as launched:
+            if ckpt_kind == "offload":
+                packed: list = []
+                with _offload_hooks(packed):
+                    loss = head(X, W)
+                assert packed
+            else:
+                loss = _checkpointed(ckpt_kind, head, X, W)
+            loss.backward()
+        torch.cuda.synchronize()
+        return {"dX": X.grad, "dW": W.grad}, launched
+
+    ckpt_kind = {
+        "placement_forward": "nonreentrant",
+        "selective": "selective_recompute",
+        "modified": "nonreentrant",
+        "deterministic": "nonreentrant",
+    }.get(kind, kind)
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(_logprob_one_pass(True))
+        if kind == "placement_forward":
+            stack.enter_context(_placement("forward"))
+        if kind == "deterministic":
+            stack.enter_context(_torch_deterministic(True))
+        plain, plain_launched = step("plain")
+        got, launched = step(ckpt_kind)
+    assert plain_launched == [fwd, combine, dw]
+    once = [fwd, combine, dw]
+    twice = [fwd, combine, fwd, combine, dw]
+    want = {
+        "nonreentrant": once,
+        "selective": once,
+        "selective_save_all": once,
+        "deterministic": once,
+        "offload": once,
+        "offload_inside": once,
+        "reentrant": [nodx, combine, fwd, combine, dw],
+        "placement_forward": twice,
+        "modified": twice,
+        "offload_outside": twice,
+        "copies_outside": twice,
+    }[kind]
+    assert launched == want, (kind, launched)
+    _assert_step_bits(got, plain, keys=("dX", "dW"))
+    contract_lm_head(got, inp, entry="logprob")
+
+
+def test_device_logprob_one_pass_cuda_graph(glm_weight):
+    """A one-row log-probability step on the one-pass route (forward and ``torch.autograd.grad``) captured into a CUDA
+    graph after eager steps launches the route's stages and replays for other ``X`` / ``labels`` / ``dlogp`` values
+    written into the captured inputs -- among them an ignored row with a NaN ``dlogp`` -- holding its contract on
+    each."""
+    _require_one_pass(1)
+    inps = [
+        _device_inputs(1, "ce", W=glm_weight, ignore_frac=0.0, seed=SEED + k)
+        for k in range(2)
+    ]
+    gone = _device_inputs(1, "ce", W=glm_weight, ignore_frac=1.0, seed=SEED + 2)
+    gone = dataclasses.replace(
+        gone, dlogp=torch.full((1,), float("nan"), dtype=torch.float32, device=CUDA)
+    )
+    W = glm_weight.detach().requires_grad_(True)
+    X = inps[0].X.detach().clone().requires_grad_(True)
+    labels, dlogp = inps[0].labels.clone(), inps[0].dlogp.clone()
+
+    def step():
+        return _small_call_step(X, W, labels, "logprob", dlogp=dlogp)
+
+    with _logprob_one_pass(True):
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side):
+            for _ in range(2):
+                step()
+        torch.cuda.current_stream().wait_stream(side)
+        graph = torch.cuda.CUDAGraph()
+        with _one_pass_launches() as launched, torch.cuda.graph(graph):
+            captured = step()
+    assert launched == _one_pass_stages(1)
+    for src in inps[1:] + [gone] + inps[:1]:
+        with torch.no_grad():
+            X.copy_(src.X)
+        labels.copy_(src.labels)
+        dlogp.copy_(src.dlogp)
+        graph.replay()
+        torch.cuda.synchronize()
+        got = [None if t is None else t.clone() for t in captured]
+        contract_lm_head(
+            dict(zip(("loss", "logp", "dX", "dW"), got, strict=True)),
+            src,
+            entry="logprob",
+        )
+
+
+@pytest.mark.parametrize("ignore_frac", [0.0, 1.0])
+def test_device_logprob_one_pass_has_no_host_synchronization(glm_weight, ignore_frac):
+    """A one-row log-probability call on the one-pass route (forward and backward, the row ignored too) synchronizes
+    nothing: PyTorch's synchronization debug mode at ``"error"`` raises nothing."""
+    _require_one_pass(1)
+    inp = _device_inputs(1, "ce", W=glm_weight, ignore_frac=ignore_frac)
+    X = inp.X.detach().requires_grad_(True)
+    W = inp.W.detach().requires_grad_(True)
+    with _logprob_one_pass(True):
+        for _ in range(2):
+            _small_call_step(X, W, inp.labels, "logprob", dlogp=inp.dlogp)
+        torch.cuda.synchronize()
+        previous = torch.cuda.get_sync_debug_mode()
+        torch.cuda.set_sync_debug_mode("error")
+        try:
+            with _one_pass_launches() as launched:
+                _small_call_step(X, W, inp.labels, "logprob", dlogp=inp.dlogp)
+        finally:
+            torch.cuda.set_sync_debug_mode(previous)
+        torch.cuda.synchronize()
+    assert launched == _one_pass_stages(1)
+
+
+def test_device_logprob_one_pass_retained_graph_and_accumulation(
+    glm_weight, record_property
+):
+    """Both backward passes of a retained one-row log-probability graph give the same ``dX`` / ``dW`` bits (the
+    backward reads the kept state, never writes it); two calls into one ``W`` (``X`` frozen: the forward without the
+    head-row sums, the backward writes ``dW`` alone) accumulate the autograd engine's sum; every result holds its
+    contract.  At the production head (``H`` 6144, ``V`` 154880) each draw's ``logp`` and both backward passes are
+    judged against the naive tier (``name@first`` / ``name@retained``)."""
+    _require_one_pass(1)
+
+    def passes(problem):
+        X2 = problem.X.detach().requires_grad_(True)
+        W2 = problem.W.detach().requires_grad_(True)
+        logp = cake_backend.cake_lm_head_nondet_train_logprob(
+            X2, W2, problem.labels, chunk_size=4096
+        )
+        results = {}
+        for label, retain in (("first", True), ("retained", False)):
+            dx, dw = torch.autograd.grad(
+                logp, (X2, W2), grad_outputs=problem.dlogp, retain_graph=retain
+            )
+            results[label] = {"dX": dx, "dW": dw}
+        results["first"]["logp"] = logp.detach()
+        return results
+
+    a = _device_inputs(1, "ce", W=glm_weight, ignore_frac=0.0)
+    b = _device_inputs(1, "ce", W=glm_weight, seed=SEED + 7, ignore_frac=0.0)
+    W = glm_weight.detach().requires_grad_(True)
+    seen_w = []
+    W.register_hook(lambda g: seen_w.append(g.detach().clone()))
+    with _logprob_one_pass(True), _one_pass_launches() as launched:
+        out = passes(a)
+        for inp in (a, b):
+            cake_backend.cake_lm_head_nondet_train_logprob(
+                inp.X.detach(), W, inp.labels, chunk_size=4096
+            ).backward(inp.dlogp)
+    torch.cuda.synchronize()
+    stages = _one_pass_stages(1)
+    assert launched == stages + stages[-1:] + _one_pass_stages(1, need_dx=False) * 2
+    for key in ("dX", "dW"):
+        assert _same_bits(out["first"][key], out["retained"][key]), key
+    for result in out.values():
+        contract_lm_head(result, a, entry="logprob")
+    assert len(seen_w) == 2 and _same_bits(W.grad, seen_w[0] + seen_w[1])
+    contract_lm_head({"dW": seen_w[0]}, a, entry="logprob")
+    contract_lm_head({"dW": seen_w[1]}, b, entry="logprob")
+    del a, b, W
+    seen_w.clear()  # the name stays bound: the hook reads it
+
+    def launch(j, s):
+        draw = judge_inputs(1, s, H=GLM_H, V=GLM_V, device=CUDA, ignore_frac=0.0)
+        with _logprob_one_pass(True), _one_pass_launches() as draw_launched:
+            results = passes(draw)
+        assert draw_launched == stages + stages[-1:], (j, draw_launched)
+        return [(draw, results)]
+
+    _judge_problems(
+        record_property,
+        launch,
+        ("first", "retained"),
+        seed=SEED + 103,
+        entry="logprob",
+        names={"first": ("logp", "dX", "dW"), "retained": ("dX", "dW")},
+    )
+
+
+def test_device_logprob_one_pass_binding_cache_off(monkeypatch, glm_weight):
+    """While the binding cache is enabled a one-row log-probability call on the one-pass route validates its inputs
+    once per (device, V, chunk size) as the log-probability entry (``_ONE_PASS_VALID``); with the cache disabled every
+    call validates; the outputs are the same bits either way."""
+    _require_one_pass(1)
+    inp = _device_inputs(1, "ce", W=glm_weight, ignore_frac=0.0)
+    cache = cake_backend.BindingCache()
+    monkeypatch.setattr(cake_backend, "BINDING_CACHE", cache)
+    keys = set()
+    monkeypatch.setattr(cake_backend, "_ONE_PASS_VALID", keys)
+    validated = []
+    real = cake_backend.validate_lm_head_inputs
+
+    def counting(*args, **kwargs):
+        validated.append(kwargs.get("entry"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(cake_backend, "validate_lm_head_inputs", counting)
+    cache.configure(enabled=True)
+    with _logprob_one_pass(True), _one_pass_launches() as launched:
+        on = [_run(inp, 4096, entry="logprob", backend="cake") for _ in range(2)]
+        assert validated == ["logprob"] and len(keys) == 1, validated
+        validated.clear()
+        cache.configure(enabled=False)
+        off = [_run(inp, 4096, entry="logprob", backend="cake") for _ in range(2)]
+        assert validated == ["logprob", "logprob"], validated
+    assert launched == _one_pass_stages(1) * 4
+    for out in on[1:] + off:
+        for key in ("logp", "dX", "dW"):
+            assert _same_bits(out[key], on[0][key]), key
+
+
+@pytest.mark.parametrize(
+    "form",
+    [
+        "temperature_tensor",
+        "temperature_scalar",
+        "temperature_none",
+        "gemm_tuning",
+        "uncompacted",
+        "two_rows",
+        "kept",
+        "num_valid_rows",
+        "budget",
+        "switch_off",
+    ],
+)
+def test_device_logprob_one_pass_keeps_the_chunked_route_elsewhere(glm_weight, form):
+    """Calls outside the one-pass log-probability route launch no one-pass stage and hold their contract: the
+    temperature entry (a tensor, a scalar 2.0, ``None``), an explicit ``gemm_tuning``, ``compact_rows=False``, two rows
+    (with ``one_pass_rows`` empty), the kept-logits entry with a backward, the opt-in ``num_valid_rows`` and
+    ``memory_mode="budget"`` forms, and the switch off."""
+    _require_program(entry="logprob")
+    if form in ("temperature_tensor", "temperature_scalar"):
+        _require_tau_program()
+    inp = _device_inputs(
+        2 if form == "two_rows" else 1, "ce", W=glm_weight, ignore_frac=0.0
+    )
+    kw = {
+        "temperature_tensor": {
+            "temperature": torch.full((1,), 1.5, dtype=torch.float32, device=CUDA)
+        },
+        "temperature_scalar": {"temperature": 2.0},
+        "temperature_none": {"temperature": None},
+        "gemm_tuning": {"gemm_tuning": _ONE_SLICE},
+        "uncompacted": {"compact_rows": False},
+        "two_rows": {},
+        "kept": {"keep": True},
+        "num_valid_rows": {"num_valid_rows": 1},
+        "budget": {"memory_mode": "budget"},
+        "switch_off": {},
+    }[form]
+    with (
+        _logprob_one_pass(form != "switch_off"),
+        _one_pass_rows(()),
+        _one_pass_launches() as launched,
+    ):
+        out = _run(inp, 4096, entry="logprob", backend="cake", **kw)
+    assert launched == [], (form, launched)
+    contract_lm_head(out, inp, entry="logprob")
+
+
+def test_device_logprob_one_pass_delegation(glm_weight):
+    """The opt-in module's default and ``"fast"`` forms and the public facade reach the one-pass log-probability route
+    (the forward, the merge, the backward); the opt-in kept-logits form where no backward can follow runs the
+    backend's default entry, the forward without the head-row sums."""
+    _require_one_pass(1)
+    import cake_pplx.cake_lm_head_nondet_train as public
+
+    inp = _device_inputs(1, "ce", W=glm_weight, ignore_frac=0.0)
+    with _logprob_one_pass(True):
+        for kw in ({"memory_mode": None}, {"memory_mode": "fast"}):
+            with _one_pass_launches() as launched:
+                out = _run(inp, 4096, entry="logprob", backend="cake", **kw)
+            assert launched == _one_pass_stages(1), (kw, launched)
+            contract_lm_head(out, inp, entry="logprob")
+        X = inp.X.detach().requires_grad_(True)
+        W = inp.W.detach().requires_grad_(True)
+        with _one_pass_launches() as launched:
+            public.cake_lm_head_nondet_train_logprob(
+                X, W, inp.labels, chunk_size=4096
+            ).backward(inp.dlogp)
+        torch.cuda.synchronize()
+        assert launched == _one_pass_stages(1), launched
+        with _one_pass_launches() as launched, torch.no_grad():
+            opt_in.cake_lm_head_nondet_train_logprob(
+                inp.X, inp.W, inp.labels, chunk_size=4096, memory_mode="keep_logits"
+            )
+        torch.cuda.synchronize()
+        assert launched == _one_pass_stages(1, need_dx=False)[:-1], launched
+
+
+def test_device_logprob_one_pass_logp_is_not_a_view(glm_weight):
+    """The one-pass log-probability call returns a fresh ``logp`` (no view of the kept state): an in-place change of it
+    works as on the chunked path -- ``logp.mul_(2)`` then ``backward(dlogp)`` gives the bits of ``backward(2 * dlogp)``
+    -- and leaves the kept state alone."""
+    _require_one_pass(1)
+    inp = _device_inputs(1, "ce", W=glm_weight, ignore_frac=0.0)
+    out = {}
+    with _logprob_one_pass(True):
+        for label in ("modified", "scaled"):
+            X = inp.X.detach().requires_grad_(True)
+            W = inp.W.detach().requires_grad_(True)
+            logp = cake_backend.cake_lm_head_nondet_train_logprob(
+                X, W, inp.labels, chunk_size=4096
+            )
+            assert logp._base is None
+            if label == "modified":
+                logp.mul_(2.0)
+                logp.backward(inp.dlogp)
+            else:
+                logp.backward(2.0 * inp.dlogp)
+            torch.cuda.synchronize()
+            out[label] = (X.grad, W.grad)
+    assert _same_bits(out["modified"][0], out["scaled"][0])
+    assert _same_bits(out["modified"][1], out["scaled"][1])
+
+
+def test_device_logprob_one_pass_on_a_non_current_device(glm_weight):
+    """A one-row log-probability call on the one-pass route whose tensors are on ``cuda:1`` while the current device is
+    0 launches there (device index 1), keeps the current device 0, holds its contract and gives the bits of the same
+    call on device 0 (one GPU model)."""
+    _require_one_pass(1)
+    if torch.cuda.device_count() < 2:
+        pytest.skip("requires two CUDA devices")
+    if (
+        not cake_backend.generated_program_available(
+            torch.device("cuda", 1), entry="loss"
+        )
+        or 1 not in cake_backend._one_pass_record(1)[2]
+    ):
+        pytest.skip("device 1 registers no one-pass programs of 1 row")
+    one = torch.device("cuda", 1)
+    inp = _device_inputs(1, "ce", W=glm_weight, ignore_frac=0.0)
+    far = dataclasses.replace(
+        inp,
+        X=inp.X.to(one),
+        W=inp.W.to(one),
+        labels=inp.labels.to(one),
+        dlogp=inp.dlogp.to(one),
+    )
+    indices = []
+    real = cake_backend._one_pass_launch
+
+    def launch(module_name, record, stage, values, device, index):
+        indices.append(index)
+        return real(module_name, record, stage, values, device, index)
+
+    cake_backend._one_pass_launch = launch
+    try:
+        with torch.cuda.device(0), _logprob_one_pass(True):
+            near_out = _run(inp, 4096, entry="logprob", backend="cake")
+            far_out = _run(far, 4096, entry="logprob", backend="cake")
+            torch.cuda.synchronize(one)
+            assert torch.cuda.current_device() == 0
+    finally:
+        cake_backend._one_pass_launch = real
+    assert indices == [0, 0, 0, 1, 1, 1], indices
+    contract_lm_head(far_out, far, entry="logprob")
+    same_model = torch.cuda.get_device_properties(0).multi_processor_count == (
+        torch.cuda.get_device_properties(1).multi_processor_count
+    )
+    for key in ("logp", "dX", "dW"):
+        assert far_out[key].device == one, key
+        if same_model:
+            assert _same_bits(far_out[key].to(CUDA), near_out[key]), key
 
 
 def test_cast_fold_plan_keys():

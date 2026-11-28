@@ -135,9 +135,11 @@ so dK/dV keep the bits of one launch.  dQ is summed through the FP32 partial,
 so it can differ from the dQ of one launch in the last FP32 places.  `P`
 follows that package's policy (`cake_backend.plan_key_passes`); a row of more
 than one token chunk (4224 tokens at top-k 2048 for rope) takes one pass here,
-because every pass runs all tokens in one launch.  The NoPE record's policy
-is that package's NoPE policy, which never plans a second pass.  `key_passes`
-overrides `P` in both programs.  The redo stays one launch.
+because every pass runs all tokens in one launch, and so does a rope backward
+above 64 heads (from 0.13.1; see "96 and 128 query heads").  The NoPE
+record's policy is that package's NoPE policy, which never plans a second
+pass.  `key_passes` overrides `P` in both programs.  The redo stays one
+launch.
 
 Non-finite values: a pair whose contribution is NaN or infinite has no integer
 image, so the counters flag its destination row, the redo flags it again, and
@@ -408,9 +410,20 @@ order or the key-pass count.
 Storage scales with `H`: `o_lo` and dQ hold `H` KiB per query token (the
 dead-storage rules of "Storage and the `o_lo` rule" read that capacity),
 `delta` takes `4 H` B per token, and a key-range-pass backward keeps `2 T`
-dQ partial blocks; the policy's token chunk counts two blocks per token (2,176
-tokens at top-k 2048, 4,224 at 64 heads: `KeyPassPolicy.token_chunk(topk,
-items_per_token)`), and a longer row takes one pass.
+dQ partial blocks.  From 0.13.1 the policy plans one key pass above 64 heads on
+every row (`plan_key_passes` with `items_per_token = HEAD_WINDOW_ITEMS`);
+`key_passes` still selects the pass build `bwd_main_pass_hw`.  Before, the
+record's rule planned two to four passes on the rows of one 2,176-token chunk
+(two dQ partial blocks per token; top-k 2048): on `sm_100a` / `sm_103a` the
+formula's two to four passes from 45,512 to 182,044 keys (two / three / four
+at 65,536 / 131,072 / 163,840 keys), on `sm_107a` two from 131,072 keys.
+One pass was faster on every such row timed (96 and 128 heads; backward,
+training step and checkpointed recompute; medians of same-round ratios): B200
+(`T = 2,048`, `S = 131,072`, three passes) 6-12 %, GB300 (`T = 2,048` with
+`S = 65,536` / `131,072`, `T = 1,024` with `S = 163,840`; two / three / four
+passes) 5-19 %, VR200 (`T = 1,024` to `2,176` with `S = 131,072` to
+`1,048,320`, two passes) 5-10 %; it also needs no pass scratch.  dQ takes the
+one-pass FP32 summation order there; dK / dV keep their bits.
 `cake_backend.dsa_train_workspace_size(..., num_heads=H)` sizes a prepared
 runner.
 

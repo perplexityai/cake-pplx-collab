@@ -1175,10 +1175,32 @@ def _det_tables_0327(m):
 def _det_tables_0328(m):
     """Put the deterministic package's tables of version 0.3.28 back (``m``: a monkeypatch context; applying it again
     in a nested context changes nothing): no 152-SM ``sm_100a`` part rules (:data:`DET_0329_PART_KEYS`) and no router
-    split count of :data:`DET_ROUTER_0329_RULES`.  Its version 0.3.29 changes nothing else."""
+    split count of :data:`DET_ROUTER_0329_RULES`, on its tables of version 0.3.29 (:func:`_det_tables_0329`).  Its
+    version 0.3.29 changes nothing else."""
+    _det_tables_0329(m)
     m.delitem(det_backend.ROW_RULES_BY_SM, ("sm_100a", 152), raising=False)
     for key in DET_ROUTER_0329_RULES:
         m.delitem(det_backend.ROUTER_SPLIT_RULES, key, raising=False)
+
+
+def _det_tables_0329(m):
+    """Put the deterministic package's tables of version 0.3.29 back (``m``: a monkeypatch context; applying it again
+    in a nested context changes nothing): in each part of :data:`DET_0330_PART_KEYS` its rule of version 0.3.29 at a
+    key its version 0.3.30 changes (:data:`DET_0330_PRIOR`) and no other key of that version, and no part of
+    :data:`DET_0330_NEW_PARTS`; a part or a changed key the tables in place do not hold (an older version's tables, a
+    nested application) stays absent.  Its version 0.3.30 changes nothing else."""
+    for part, keys in DET_0330_PART_KEYS.items():
+        if part in DET_0330_NEW_PARTS:
+            m.delitem(det_backend.ROW_RULES_BY_SM, part, raising=False)
+            continue
+        table = det_backend.ROW_RULES_BY_SM.get(part)
+        if table is None:
+            continue
+        for key in keys:
+            if (part, key) not in DET_0330_PRIOR:
+                m.delitem(table, key, raising=False)
+            elif key in table:
+                m.setitem(table, key, DET_0330_PRIOR[(part, key)])
 
 
 def _det_tables_0325(m):
@@ -23881,3 +23903,113 @@ def test_gpu_router_0329_rows(key, record_property):
         assert bool(storage.isnan().all()), key
     print(f"ROUTER_0329 nondet {what}: the deterministic program at {count} splits")
     cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# Version 0.3.30 of the deterministic package: exact keys added to (or changed in) the part rules of its screened
+# device classes (no router change)
+# ---------------------------------------------------------------------------
+
+# The constants of that version, generated from its measurements and its planner (never typed by hand):
+# ``DET_0330_PART_KEYS`` (part -> its keys of the version), ``DET_0330_PRIOR`` ((part, key) -> its rule of version
+# 0.3.29 at a key the version changes), ``DET_0330_NEW_PARTS`` (the parts its version 0.3.29 did not have) and
+# ``DET_0330_ROWS`` (the measured rows of the keys: part, key, op, output dtype, T and view; a view is
+# ``("proj", d_in, d_out)`` or ``("mla", heads, d_in, d_out, head stride, weight layout)``).
+# fmt: off
+DET_0330_PART_KEYS = {
+    ("sm_103a", 152): (
+        ("sm_103a", False, False, False, False, False, 4096, 1536, 16380),
+        ("sm_103a", False, False, False, False, False, 18432, 1536, 16380),
+        ("sm_103a", False, True, False, False, False, 1024, 4096, 32736),
+        ("sm_103a", False, True, False, False, False, 1024, 4096, 32768),
+        ("sm_103a", False, True, False, False, False, 1536, 18432, 16380),
+        ("sm_103a", False, True, False, False, False, 3584, 7168, 16380),
+        ("sm_103a", False, True, False, False, False, 7168, 3584, 16380),
+        ("sm_103a", False, True, False, False, False, 7168, 6144, 16380),
+        ("sm_103a", True, True, True, False, False, 6144, 16380, 7168),
+        ("sm_103a", True, True, True, False, False, 7168, 16380, 6144),
+    ),
+    ("sm_100a", 148): (
+        ("sm_100a", False, True, False, False, False, 1024, 4096, 32736),
+    ),
+}
+DET_0330_PRIOR = {
+}
+DET_0330_NEW_PARTS = ()
+DET_0330_ROWS = (
+    (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 4096, 1536, 16380), "fwd", "bf16", 16380, ("proj", 1536, 4096)),
+    (("sm_103a", 152), ("sm_103a", False, False, False, False, False, 18432, 1536, 16380), "fwd", "bf16", 16380, ("proj", 1536, 18432)),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 1024, 4096, 32736), "dgrad", "bf16", 32736, ("proj", 1024, 4096)),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 1024, 4096, 32768), "dgrad", "bf16", 32768, ("proj", 1024, 4096)),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 1536, 18432, 16380), "dgrad", "bf16", 16380, ("proj", 1536, 18432)),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 3584, 7168, 16380), "dgrad", "bf16", 16380, ("proj", 3584, 7168)),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 7168, 3584, 16380), "dgrad", "bf16", 16380, ("proj", 7168, 3584)),
+    (("sm_103a", 152), ("sm_103a", False, True, False, False, False, 7168, 6144, 16380), "dgrad", "bf16", 16380, ("proj", 7168, 6144)),
+    (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 6144, 16380, 7168), "wgrad", "f32", 16380, ("proj", 6144, 7168)),
+    (("sm_103a", 152), ("sm_103a", True, True, True, False, False, 7168, 16380, 6144), "wgrad", "f32", 16380, ("proj", 7168, 6144)),
+    (("sm_100a", 148), ("sm_100a", False, True, False, False, False, 1024, 4096, 32736), "dgrad", "bf16", 32736, ("proj", 1024, 4096)),
+)
+# fmt: on
+
+
+def test_k1_det_0330_rows_follow_the_det_tables(monkeypatch):
+    """The measured rows of the deterministic package's version 0.3.30 (:data:`DET_0330_ROWS`) on their parts, as the
+    call of the row and, for a projection's weight gradient, as the unbatched generic call ``G.T @ X``, with the K1
+    programs registered on the architectures of the parts: where this package keeps the call on the deterministic
+    program (a layout routed ``"det"``, or :func:`plan_atomic_gemm` returns no plan) its plan is the deterministic
+    package's, field for field, with either version of its tables (:func:`_det_tables_0329`); where it runs its own
+    program the plan is the plan of :func:`plan_atomic_gemm` and the plan with the tables of version 0.3.29.  The
+    deterministic plan differs from its plan of version 0.3.29 exactly where it reads the row's key (every call of the
+    row; the generic call where it plans that key).  The counts of the cells of each kind are printed; this is a plan
+    check: it asserts no bits."""
+    for arch in sorted({part[0] for part in DET_0330_PART_KEYS}):
+        _register_k1(monkeypatch, arch)
+
+    def plans(A, B, out, transposed, arch, sm_count):
+        """``(keeps, det, nd)``: whether this package keeps the call on the deterministic program, the deterministic
+        planner's plan and this package's."""
+        kw = dict(sm_count=sm_count, l2_bytes=126 << 20, transposed_out=transposed, arch=arch)
+        det = det_backend.cake_dense_gemm_det_train_projection_plan(A, B, out, **kw)
+        assert isinstance(det, tuple) and len(det) == 4, type(det)
+        nd = cake_backend.cake_dense_gemm_nondet_train_projection_plan(A, B, out, **kw)
+        own = None
+        if cake_backend.ROUTES[cake_backend._k1_layout(A, B)] != "det":
+            own, *_ = cake_backend.plan_atomic_gemm(
+                A, B, out, transposed_out=transposed, arch=arch, sm_count=sm_count
+            )
+        if own is None:
+            assert isinstance(nd, tuple) and len(nd) == 4, type(nd)
+            return True, det[0], nd[0]
+        assert isinstance(nd, cake_backend.CakeDenseGemmNondetProjectionPlan), type(nd)
+        assert nd == own, (nd, own)
+        return False, det[0], nd
+
+    seen = {}
+    cells = 0
+    for part, key, op, out_dtype, T, view in DET_0330_ROWS:
+        arch, sm_count = part
+        assert key in DET_0330_PART_KEYS[part], (part, key)
+        for call, A, B, out, transposed in _views_0328(arch, op, out_dtype, T, view):
+            where = (call, part, key, op, out_dtype, T, view)
+            keeps, det, nd = plans(A, B, out, transposed, arch, sm_count)
+            with monkeypatch.context() as m:
+                _det_tables_0329(m)
+                old_keeps, old_det, old_nd = plans(A, B, out, transposed, arch, sm_count)
+            assert keeps == old_keeps, where
+            reads = _det_key_0328(old_det, arch) == key
+            assert _det_key_0328(det, arch) == _det_key_0328(old_det, arch), where
+            assert (det != old_det) == reads, (where, det.template, old_det.template)
+            assert reads or call == "generic", where
+            if keeps:
+                assert nd == det, (where, nd.template, det.template)
+                assert old_nd == old_det, (where, old_nd.template, old_det.template)
+                kind = "det, changed" if reads else "det"
+            else:
+                assert nd == old_nd, (where, nd.template, old_nd.template)
+                kind = "own program"
+            seen[(call, kind)] = seen.get((call, kind), 0) + 1
+            cells += 1
+    print(f"K1_DET_0330 {seen}")
+    generic = sum((op, view[0]) == ("wgrad", "proj") for _part, _key, op, _dtype, _T, view in DET_0330_ROWS)
+    assert cells == sum(seen.values()) == len(DET_0330_ROWS) + generic, seen
+    assert seen.get(("entry", "det, changed")), seen
