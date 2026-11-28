@@ -45,12 +45,12 @@ The deterministic column-slab records (``bwd_slab``) and final-reduction records
   need a whole SM, can become resident while the token-owner pass still runs.
   The grid completes only after its last CTA's wait, so the column-slab pass,
   which waits for this grid, still follows the token-owner pass.  On sm_100a
-  the 256-thread split also ships in the ``_dep1`` chain
+  and sm_103a the 256-thread split also ships in the ``_dep1`` chain
   (``cake_mhc_train_fn_split_atomic__tv128_dep1``): the records of both chains
   select by :func:`fn_split_bwd_program`, which names ``dep1`` in the
   token-count bands of the board's cell of ``FN_SPLIT_CHAIN_OVERRIDES`` (B200
-  with 148 SMs, to 4096 tokens but not from 1665 to 1728) and ``dep``
-  elsewhere;
+  with 148 SMs, to 4096 tokens but not from 1665 to 1728; GB300 with 152 SMs,
+  from 4096 to 8192 tokens) and ``dep`` elsewhere;
 * ``cake_mhc_train_bwd_slab_fold__dynr`` (every architecture): the
   deterministic dynamic-schedule column-slab form ``dynr``, which stores the
   FP32 ``dfn`` sums of every (column slab, token chunk) unit into its chunk's
@@ -125,10 +125,11 @@ records per size under the deterministic suffix ``__h<H>``: the fn split
 ``cake_mhc_train_fn_split_atomic__tv128_dep__h<H>`` (sm_100a, sm_103a) and
 ``cake_mhc_train_fn_split_atomic__tv128_t128_dep__h<H>`` (sm_107a: the
 128-thread split of the size, launched as ``_dep`` -- every CTA waits for the
-token-owner pass as its last instruction; no ``_dep1`` form of these sizes is
-built), the column slab ``cake_mhc_train_bwd_slab_fold__dynr__h<H>`` and
-its slab-fastest copy ``cake_mhc_train_bwd_slab_fold__dynr_os__h<H>`` (every
-architecture), and their reduction forms
+token-owner pass as its last instruction; no ``_dep1`` form of the 128-thread
+split is built at these sizes), the column slab
+``cake_mhc_train_bwd_slab_fold__dynr__h<H>`` and its slab-fastest copy
+``cake_mhc_train_bwd_slab_fold__dynr_os__h<H>`` (every architecture), and
+their reduction forms
 ``cake_mhc_train_bwd_slab_red__dynr__h<H>`` and
 ``cake_mhc_train_bwd_slab_red__dynr_os__h<H>`` (sm_107a).  The
 column slab runs ``dynr`` in the ``"chunk"`` band of
@@ -145,11 +146,13 @@ reduction record ``cake_mhc_train_bwd_slab_red__dynr_os__h<H>``, under
 ``torch.use_deterministic_algorithms(True)`` its fold record); everywhere else
 on sm_107a the size's ``dynr`` form runs (its reduction record
 ``cake_mhc_train_bwd_slab_red__dynr__h<H>``, under
-``torch.use_deterministic_algorithms(True)`` its fold record).  At 7168 sm_100a
-also ships ``cake_mhc_train_fn_split_atomic__tv128_dep1__h7168`` (the
-``_dep1`` chain, by ``FN_SPLIT_CHAIN_OVERRIDES``) and sm_100a / sm_103a
+``torch.use_deterministic_algorithms(True)`` its fold record).  At 7168
+sm_100a / sm_103a also ship ``cake_mhc_train_fn_split_atomic__tv128_dep1__h7168``
+(the ``_dep1`` chain, by ``FN_SPLIT_CHAIN_OVERRIDES``) and
 ``cake_mhc_train_bwd_slab_fold__dynr_late__h7168`` (the late draw, by
-``BWD_SLAB_DRAW_OVERRIDES``); 5120 has neither.
+``BWD_SLAB_DRAW_OVERRIDES``); at 5120 sm_100a also ships
+``cake_mhc_train_fn_split_atomic__tv128_dep1__h5120`` (the ``_dep1`` chain);
+5120 has no late-draw record.
 
 So ``bwd_finish`` is the deterministic token-owner pass (with its group-row
 forms ``_trows_dyn`` inside ``BWD_ROW_BANDS``), the fn split and the column
@@ -265,9 +268,10 @@ architecture under the same rule as hidden 4096: the deterministic ``__h<H>``
 records but the backward fn split, the column slab and the reduction, and a
 ``bwd_finish`` of the deterministic token-owner records, the atomic fn split
 ``__h<H>`` and the column slab ``dynr__h<H>`` and ``dynr_os__h<H>`` (at 7168
-also the ``_dep1`` split on sm_100a and the late draw ``dynr_late__h7168`` on
-sm_100a / sm_103a), and (sm_107a) the reduction forms ``dynr__h<H>`` and
-``dynr_os__h<H>`` of the ``cake_mhc_train_bwd_slab_red`` records.
+also the ``_dep1`` split and the late draw ``dynr_late__h7168`` on sm_100a /
+sm_103a, at 5120 the ``_dep1`` split on sm_100a), and (sm_107a) the
+reduction forms ``dynr__h<H>`` and ``dynr_os__h<H>`` of the
+``cake_mhc_train_bwd_slab_red`` records.
 Every rule takes the hidden size as its last argument and reads its tables
 through ``_tab`` as the deterministic registry's do (``H_TABLES`` spells every
 table for 5120 and 7168: a size it does not spell is an error, never the 4096
@@ -506,6 +510,7 @@ MODULES: dict[str, dict[str, Any]] = {
     "cake_mhc_train_fn_split_atomic__tv128_dep1": {
         "arches": [
             "sm_100a",
+            "sm_103a",
         ],
         "arg_plan": [
             ["buffer", "fn"],
@@ -5119,7 +5124,58 @@ MODULES: dict[str, dict[str, Any]] = {
             "fnTp": "fnTp",
         },
         "role": "fn_split_bwd",
-        "select_rule": None,
+        "select_rule": {
+            "kind": "program",
+            "program": "dep",
+            "rule": "fn_split_bwd_program",
+        },
+        "workspace_rule": {
+            "kind": "regions",
+            "workspace": "bwd",
+        },
+    },
+    "cake_mhc_train_fn_split_atomic__tv128_dep1__h5120": {
+        "arches": [
+            "sm_100a",
+        ],
+        "arg_plan": [
+            ["buffer", "fn"],
+            ["buffer", "fnTp"],
+            ["buffer", "dfn"],
+            ["parameter", "accumulate"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "ctas": 320,
+            "kind": "fixed",
+        },
+        "hidden": 5120,
+        "kernel": "cake_mhc_train_fn_split_atomic__tv128_dep1__h5120",
+        "kernel_symbol": "kernel_cake_mhc_train_fn_split_atomic__tv128_dep1__h5120",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "persistent_ctas_per_sm": 1,
+            "use_pdl": True,
+        },
+        "library": "cake_mhc_train_fn_split_atomic__tv128_dep1__h5120",
+        "logical": {
+            "accumulate": "accumulate",
+            "dfn": "dfn",
+            "fn": "fn",
+            "fnTp": "fnTp",
+        },
+        "role": "fn_split_bwd",
+        "select_rule": {
+            "kind": "program",
+            "program": "dep1",
+            "rule": "fn_split_bwd_program",
+        },
         "workspace_rule": {
             "kind": "regions",
             "workspace": "bwd",
@@ -6642,6 +6698,7 @@ MODULES: dict[str, dict[str, Any]] = {
     "cake_mhc_train_fn_split_atomic__tv128_dep1__h7168": {
         "arches": [
             "sm_100a",
+            "sm_103a",
         ],
         "arg_plan": [
             ["buffer", "fn"],
@@ -10603,9 +10660,9 @@ MODULES: dict[str, dict[str, Any]] = {
 # (their group-row forms ``_trows_dyn`` included, on sm_100a and sm_103a at
 # hidden 4096, 5120 and 7168), the atomic fn split of the architecture
 # (launched after the token-owner pass, as its programmatic dependent; on
-# sm_107a the ``_dep1`` form, whose last CTA alone waits; on sm_100a at 4096 and
-# 7168 the ``_dep`` record followed by its ``_dep1`` record, one per call by
-# ``fn_split_bwd_program``) and the column
+# sm_107a the ``_dep1`` form, whose last CTA alone waits; on sm_100a at every
+# hidden size and on sm_103a at 4096 and 7168 the ``_dep`` record followed by its
+# ``_dep1`` record, one per call by ``fn_split_bwd_program``) and the column
 # slab's fold
 # forms (``dynr`` and its slab-fastest copy ``dynr_os``: one per call by
 # ``bwd_slab_atomic_program``; no final-reduction record): both at every hidden
@@ -10697,6 +10754,7 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_mhc_train_bwd_token__dot_ao8_trows_dyn__h5120",
             "cake_mhc_train_bwd_token__rt64__h5120",
             "cake_mhc_train_fn_split_atomic__tv128_dep__h5120",
+            "cake_mhc_train_fn_split_atomic__tv128_dep1__h5120",
             "cake_mhc_train_bwd_slab_fold__dynr__h5120",
             "cake_mhc_train_bwd_slab_fold__dynr_os__h5120",
         ],
@@ -10787,6 +10845,7 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_mhc_train_bwd_token__dot_ao8_trows_dyn_ho__h5120",
             "cake_mhc_train_bwd_token__rt64_ho__h5120",
             "cake_mhc_train_fn_split_atomic__tv128_dep__h5120",
+            "cake_mhc_train_fn_split_atomic__tv128_dep1__h5120",
             "cake_mhc_train_bwd_slab_fold__dynr__h5120",
             "cake_mhc_train_bwd_slab_fold__dynr_os__h5120",
         ],
@@ -10826,6 +10885,7 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_mhc_train_bwd_token__dot_ao8_trows_dyn",
             "cake_mhc_train_bwd_token__rt64",
             "cake_mhc_train_fn_split_atomic__tv128_dep",
+            "cake_mhc_train_fn_split_atomic__tv128_dep1",
             "cake_mhc_train_bwd_slab_fold__dynr",
             "cake_mhc_train_bwd_slab_fold__dynr_late",
             "cake_mhc_train_bwd_slab_fold__dynr_os",
@@ -10928,6 +10988,7 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_mhc_train_bwd_token__dot_ao8_trows_dyn__h7168",
             "cake_mhc_train_bwd_token__rt64__h7168",
             "cake_mhc_train_fn_split_atomic__tv128_dep__h7168",
+            "cake_mhc_train_fn_split_atomic__tv128_dep1__h7168",
             "cake_mhc_train_bwd_slab_fold__dynr__h7168",
             "cake_mhc_train_bwd_slab_fold__dynr_late__h7168",
             "cake_mhc_train_bwd_slab_fold__dynr_os__h7168",
@@ -12256,14 +12317,17 @@ BWD_SLAB_DRAW_OVERRIDES: dict[
 # FN_SPLIT_CHAIN_OVERRIDES: the backward fn split's chain per board (keys as BWD_SLAB_DRAW_OVERRIDES) -> token-count
 # bands of "dep" or "dep1", read by fn_split_bwd_program at the device's SM count for the fn split records that
 # ship in both chains (select rule program "dep" / "dep1"). Every CTA of the "dep" split waits for the token-owner
-# pass as its last statement. In the "dep1" split (cake_mhc_train_fn_split_atomic__tv128_dep1, __tv128_dep1__h7168)
-# the last CTA alone waits, so the other CTAs leave their SMs while the token-owner pass runs and the column slab's
-# CTAs can become resident there sooner. The grid still completes after the token-owner pass, and both splits store
-# the same values, so the outputs are the same bits. The cells hold B200 (sm_100a with 148 SMs) at hidden 4096 and
-# 7168: "dep1" up to 4096 tokens, but "dep" from 1665 to 1728 tokens at 4096. Those token counts are the one band up
-# to 4096 tokens at 4096 where the column slab is the fold "dynr" with its own draw ("ahead"); there "dep1" showed
-# no measured gain over "dep" on B200, so they select the same records as a board without a cell. Every other board,
-# hidden 5120 and a call without an SM count run "dep" (sm_107a's fn split at 4096 is "dep1" by its record alone).
+# pass as its last statement. In the "dep1" split (cake_mhc_train_fn_split_atomic__tv128_dep1, __tv128_dep1__h5120,
+# __tv128_dep1__h7168) the last CTA alone waits, so the other CTAs leave their SMs while the token-owner pass runs and
+# the column slab's CTAs can become resident there sooner. The grid still completes after the token-owner pass, and
+# both splits store the same values, so the outputs are the same bits. The cells hold B200 (sm_100a with 148 SMs) at
+# hidden 4096 and 7168: "dep1" up to 4096 tokens, but "dep" from 1665 to 1728 tokens at 4096. Those token counts are
+# the one band up to 4096 tokens at 4096 where the column slab is the fold "dynr" with its own draw ("ahead"); there
+# "dep1" showed no measured gain over "dep" on B200, so they select the same records as a board without a cell. B200
+# at hidden 5120 runs "dep1" from 2048 to 4096 tokens, and GB300 (sm_103a with 152 SMs) from 4096 to 8192 tokens at
+# hidden 4096 and from 1024 to 49152 tokens at hidden 7168; the ends of these bands are measured token counts at which
+# "dep1" read no slower than "dep". Other token counts, GB300 at hidden 5120, every other board and a call without
+# an SM count run "dep" (sm_107a's fn split at 4096 is "dep1" by its record alone).
 FN_SPLIT_CHAIN_OVERRIDES: dict[
     tuple[str, int, int], tuple[tuple[int | None, str], ...]
 ] = {
@@ -12273,8 +12337,23 @@ FN_SPLIT_CHAIN_OVERRIDES: dict[
         (4096, "dep1"),
         (None, "dep"),
     ),
+    ("sm_100a", 148, 5120): (
+        (2047, "dep"),
+        (4096, "dep1"),
+        (None, "dep"),
+    ),
     ("sm_100a", 148, 7168): (
         (4096, "dep1"),
+        (None, "dep"),
+    ),
+    ("sm_103a", 152, 4096): (
+        (4095, "dep"),
+        (8192, "dep1"),
+        (None, "dep"),
+    ),
+    ("sm_103a", 152, 7168): (
+        (1023, "dep"),
+        (49152, "dep1"),
         (None, "dep"),
     ),
 }
@@ -13553,9 +13632,10 @@ def selected_modules(
     and 7168 the route holds each fold record beside its late-draw record
     where the architecture has one, and the rule names it in the ``"late"``
     bands of ``BWD_SLAB_DRAW_OVERRIDES``; the fn split of ``bwd_finish`` is one
-    record per architecture and hidden size, except on sm_100a at 4096 and
-    7168: there the route holds the ``_dep`` and ``_dep1`` records, and
-    :func:`fn_split_bwd_program` picks one at every token count).  A route
+    record per architecture and hidden size, except on sm_100a at every hidden
+    size and on sm_103a at 4096 and 7168: there the route holds the ``_dep`` and
+    ``_dep1`` records, and :func:`fn_split_bwd_program` picks one at every token
+    count).  A route
     with column-slab records selects exactly one of them: a call whose
     column-slab program (``BWD_SLAB_LPT``, ``BWD_SLAB_LPT_HIDDEN``,
     ``BWD_SLAB_ORDER``, ``BWD_SLAB_LPT_OVERRIDES``,

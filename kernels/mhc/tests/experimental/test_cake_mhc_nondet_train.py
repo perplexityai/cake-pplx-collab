@@ -191,11 +191,14 @@ R200_CELL_CAP_BOARD = ("sm_107a", 212, 7168)
 # Both sides of band edges of the draw cells (BWD_SLAB_DRAW_OVERRIDES) and the chain cells (FN_SPLIT_CHAIN_OVERRIDES),
 # judged on every device (where a board has no cell its records of record run): at 4096 the B200 (148 SMs) draw edges
 # 1664 / 1665, 2048 / 2049 and 5248 / 5249 and the GB300 (152 SMs) edge 1920 / 1921, at 7168 the B200 edge 1024 / 1025
-# and the GB300 edge 576 / 577, and the B200 chain edges 1664 / 1665 and 1728 / 1729 at 4096 and 4096 / 4097 at both
-# sizes (the token counts T_ACCURACY / T_ACCURACY_NEW already judge at the size are not repeated).
+# and the GB300 edge 576 / 577; the B200 chain edges 1664 / 1665 and 1728 / 1729 at 4096, 4096 / 4097 at 4096 and
+# 7168, 2047 / 2048 and 4096 / 4097 at 5120, and the GB300 chain edges 4095 / 4096 and 8192 / 8193 at 4096 and
+# 1023 / 1024 and 49152 / 49153 at 7168 (the token counts T_ACCURACY / T_ACCURACY_NEW already judge at the size are not
+# repeated).
 T_ACCURACY_DRAW = {
-    4096: (1664, 1665, 1728, 1729, 1920, 1921, 2048, 4097, 5248, 5249),
-    7168: (576, 577, 1024, 1025, 4097),
+    4096: (1664, 1665, 1728, 1729, 1920, 1921, 2048, 4095, 4097, 5248, 5249, 8193),
+    5120: (2047, 2048, 4097),
+    7168: (576, 577, 1023, 1024, 1025, 4097, 49152, 49153),
 }
 # The 19 benchmark token counts of the performance tables.
 T_BENCH = (1024, 1536, 2048, 2304, 2560, 3072, 3584, 4096, 8192, 14928, 15288, 15566, 15590, 16114, 16132, 16164,
@@ -705,9 +708,10 @@ def test_draw_and_chain_cell_edges_match_fp64(
 ) -> None:
     """Both sides of the band edges of the draw and chain cells (:data:`T_ACCURACY_DRAW`), judged as
     :func:`test_nondeterministic_backward_matches_fp64` judges each case: on B200 (148 SMs) and GB300 (152 SMs) the
-    late-draw column slab on one side of a draw edge and the fold's draw on the other, and on B200 the ``"dep1"`` fn
-    split to 4096 tokens (at 4096 but from 1665 to 1728) and the ``"dep"`` one elsewhere; every other device runs its
-    records of record."""
+    late-draw column slab on one side of a draw edge and the fold's draw on the other, and the ``"dep1"`` fn split in
+    the ``"dep1"`` bands of the chain cells (B200: to 4096 tokens at 4096, but not from 1665 to 1728, and at 7168, from
+    2048 to 4096 tokens at 5120; GB300: from 4096 to 8192 tokens at 4096, from 1024 to 49152 tokens at 7168) and the
+    ``"dep"`` one elsewhere; every other device runs its records of record."""
     _require_hidden(hidden)
     _judge_nd(
         lambda s: _make_inputs(T, hidden=hidden, seed=s), record_property, seed=SEED
@@ -1367,9 +1371,11 @@ def test_policy_prepare_node_runs_its_backward(
 )
 def test_accumulate_four_times(hidden: int, T: int, record_property) -> None:
     """Four consecutive ``accumulate=True`` passes on four input sets into caller buffers that start from non-zero
-    values (at 5120 and 7168 also at 40960 tokens, a "slab" band of the R200 board's cell at both sizes; at 4096 also
-    at 1152 and at 5120 / 7168 at 576 tokens, a "late" band of the B200 and GB300 draw cells and a "dep1" band of the
-    B200 chain cells at 4096 / 7168): the returned
+    values (at 4096 also at 1152 tokens, at 5120 and 7168 at 576 and 40960 tokens; 1152 at 4096 and 576 at 7168 lie
+    in a "late" band of the B200 and GB300 draw cells and a "dep1" band of the B200 chain cells, 576 at 5120 in no
+    draw cell (5120 has none) and below the "dep1" band of the B200 chain cell; 4096 tokens lie in a "dep1" band of
+    the B200 chain cells at every size and of the GB300 chain cells at 4096 and 7168; 40960 in a "slab" band of the
+    R200 board's cell at both sizes and at 7168 in the "dep1" band of the GB300 chain cell): the returned
     tensors are the caller's buffers; ``dfn``, ``dscale``, ``dbase`` after the four passes are
     judged against the naive BF16 tier over 32 draws of the four-fold chain (the oracle: the carried-in values plus
     the four FP64 gradients; the tier: the carried-in values in BF16 plus the four BF16 gradients, added in BF16)."""
