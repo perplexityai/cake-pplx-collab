@@ -320,9 +320,10 @@ class MoKFunctional:
         :data:`MODE_GROUPS` group runs that group's configuration only, with
         ``"after_down"``, ``fp32_wgrad=True``,
         ``router_weight_gradient="direct"`` and BF16 routed weights, on
-        sm_100a, sm_103a and sm_107a: the 512 routed experts at EP8 ``(8, 64)``
-        at top-k 10 with plain SwiGLU and ``shared_expert="scaled"``, and the
-        896 routed experts at EP64 ``(64, 14)`` at top-k 16 with
+        sm_100a, sm_103a and sm_107a: the 512 routed experts at ``(8, 64)``,
+        ``(16, 32)`` and ``(32, 16)`` at top-k 10 with plain SwiGLU and
+        ``shared_expert="scaled"``, and the 896 routed experts at
+        ``(64, 14)`` and ``(32, 28)`` at top-k 16 with
         ``activation="situ_glu"`` and ``shared_expert="none"``. The type of
         each mode is checked with the other types (``TypeError``), its value
         after them (``ValueError``).

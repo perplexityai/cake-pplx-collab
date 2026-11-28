@@ -1713,6 +1713,41 @@ def before_down_overflow(local_experts, target):
     return _digests(_snapshot((y, *gradients)))
 
 
+def group_layout_overflow(ep, local_experts, topk, short):
+    """The scheduler of the layout ``(ep, local_experts)`` on this GPU as rank 0 of its EP group (the gathered expert
+    ids are given; no peer), at 4,096 source rows per rank and the full skew to rank 0 (every token of every rank
+    routes to ``topk`` distinct experts of rank 0), with a schedule capacity ``short`` 256-row tiles below rank 0's
+    padded rows (``short`` 0: exactly those rows).  With ``short`` > 0 the rows kernel traps and the next CUDA call
+    raises, inside the scheduler call or at the synchronization after it; that error is raised again as
+    :data:`SCHEDULE_TRAPPED`.  Otherwise returns rank 0's routed rows and the capacity."""
+    tokens = 4096
+    order = rand(
+        ep * tokens, local_experts, generator=torch.Generator().manual_seed(4427)
+    ).argsort(-1)
+    ids = order[:, :topk].int().reshape(ep, tokens, topk).to("cuda").contiguous()
+    padded = int(
+        (
+            (
+                (torch.bincount(ids.flatten().long(), minlength=local_experts) + 255)
+                // 256
+            )
+            * 256
+        ).sum()
+    )
+    capacity = padded - 256 * short
+    scheduler = kernels.MoKScheduler(ep, local_experts)
+    try:
+        total = scheduler(ids, capacity, 0)[2]
+        torch.cuda.synchronize()
+    except RuntimeError as error:
+        raise RuntimeError(
+            f"{SCHEDULE_TRAPPED} at capacity {capacity} of {padded} padded rows: {error}"
+        ) from error
+    rows = int(total.item())
+    scheduler.release_counts()
+    return {"rows": rows, "padded": padded, "capacity": capacity}
+
+
 def before_down_small_step(local_experts):
     """One router-weight-before-down step of the requester's inputs (512 source rows per rank, random routes) at the
     no-overflow multiplier: the contract and five eager launches with the same bytes."""
