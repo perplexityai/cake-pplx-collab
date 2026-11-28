@@ -886,6 +886,14 @@ class ArmCake(ArmAutograd):
                 mode="nondet",
                 dx_slice_policy=self.backend.dx_slice_policy(),
                 one_pass_rows=sorted(self.backend.one_pass_rows()),
+                # the 0.3.11 route switches ("? (AttributeError ...)" on a package without them)
+                one_pass_split_rows=_probe(
+                    lambda: sorted(self.backend.one_pass_split_rows())
+                ),
+                logprob_one_pass=_probe(lambda: self.backend.logprob_one_pass()),
+                small_pad_dw_entries=_probe(
+                    lambda: sorted(self.backend.small_pad_dw_entries())
+                ),
             )
         )
         return dict(
