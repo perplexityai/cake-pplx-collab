@@ -2531,9 +2531,9 @@ def _mode_group_roles(group, layouts=None):
 
 
 #: The roles only a :data:`MODE_GROUPS` group loads (the 512-expert top-10 group: the direct-gradient backward, the
-#: scaled top-10 epilogues, the two shared-scale helpers and the (8, 64) and (16, 32) scheduler kernels; the
-#: 896-expert top-16 group: the SiTU-GLU forward, context-free forward, recompute and direct-gradient backward without
-#: a shared expert, the top-16 epilogues without a shared row and the (64, 14) and (32, 28) scheduler kernels).
+#: scaled top-10 epilogues, the two shared-scale helpers and the (8, 64), (16, 32) and (32, 16) scheduler kernels;
+#: the 896-expert top-16 group: the SiTU-GLU forward, context-free forward, recompute and direct-gradient backward
+#: without a shared expert, the top-16 epilogues without a shared row and the (64, 14) and (32, 28) scheduler kernels).
 MODE_GROUP_ROLES = tuple(
     role for group in kernels.MODE_GROUPS.values() for role in _mode_group_roles(group)
 )
@@ -3281,7 +3281,10 @@ def test_mode_group_configurations_outside_the_group_are_refused(layout, topk, c
     the group's configuration raises ``ValueError`` naming the group's configuration and the one given."""
     with pytest.raises(
         ValueError,
-        match=r"512 routed experts at top-k 10 .* runs \(EP, local experts\) \(8, 64\), \(16, 32\) at topk=10",
+        match=(
+            r"512 routed experts at top-k 10 .* runs \(EP, local experts\) "
+            r"\(8, 64\), \(16, 32\), \(32, 16\) at topk=10"
+        ),
     ):
         kernels.check_configuration(*layout, topk, **{**GROUP_OK, **change})
 
@@ -3295,7 +3298,7 @@ def test_mode_group_configuration_is_checked_before_device_work(monkeypatch):
     epilogues or another layout's scheduler kernels."""
     group = kernels.MODE_GROUPS["scaled_top10"]
     assert group.targets == ("sm_100a", "sm_103a", "sm_107a")
-    assert group.layouts == ((8, 64), (16, 32)) and group.topk == 10
+    assert group.layouts == ((8, 64), (16, 32), (32, 16)) and group.topk == 10
     for layout in group.layouts:
         assert kernels.check_configuration(*layout, 10, **GROUP_OK) == "scaled_top10"
     defaults = dict(

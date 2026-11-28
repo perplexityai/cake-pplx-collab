@@ -36,6 +36,7 @@ SCHEDULER_LAYOUTS = (
     (64, 14),
     (16, 32),
     (32, 28),
+    (32, 16),
 )
 # The 384-routed-expert layouts: top-k 6 with the router weight before the down
 # projection only.
@@ -45,7 +46,7 @@ SCHEDULER_LAYOUTS_384 = ((4, 96), (8, 48), (16, 24), (32, 12), (64, 6))
 _FUSED_CHUNKS = 32
 # The 512-routed-expert layouts: top-k 10 with the per-token shared-expert scale
 # and the direct router-weight gradient only (``MODE_GROUPS["scaled_top10"]``).
-SCHEDULER_LAYOUTS_512 = ((8, 64), (16, 32))
+SCHEDULER_LAYOUTS_512 = ((8, 64), (16, 32), (32, 16))
 # The 896-routed-expert layouts: top-k 16 with SiTU-GLU, no shared expert and the
 # direct router-weight gradient only (``MODE_GROUPS["situ_top16"]``).
 SCHEDULER_LAYOUTS_896 = ((64, 14), (32, 28))

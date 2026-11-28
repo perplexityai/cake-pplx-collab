@@ -31,8 +31,8 @@ Shared-expert weight gradients remain source-rank local.
   the direct router-weight gradient (`"direct"`: `dot(dh, h)` from the
   unscaled `dy`, defined at a zero weight) and the per-token shared-expert
   scale (`"scaled"`: `y = s * S(x) + sum_k w_k E_k(x)` with its gradient
-  `d_s`), run by the 512-routed-expert group at `(8, 64)` and `(16, 32)`,
-  top-k 10, on SM100a, SM103a and SM107a; SiTU-GLU routed experts
+  `d_s`), run by the 512-routed-expert group at `(8, 64)`, `(16, 32)` and
+  `(32, 16)`, top-k 10, on SM100a, SM103a and SM107a; SiTU-GLU routed experts
   (`activation="situ_glu"`,
   `beta tanh(gate / beta) sigmoid(gate) lb tanh(up / lb)` with per-call
   `situ_beta`, `situ_lb`) without a shared expert (`shared_expert="none"`), run
@@ -349,8 +349,8 @@ the second per-call `[macro_size, hidden]` BF16 ring that holds the scaled
 epilogues `epilogue_forward_scaled_10` and `epilogue_backward_scaled_10` (the
 arguments of the top-8 ones and `shared_scale`, FP32 `[tokens]`), the two
 shared-scale helpers `shared_scale_rows` and `shared_scale_dot`, and the count /
-rows kernels of `(8, 64)` and `(16, 32)`. The adapter refuses the group on any
-other target before it loads a kernel.
+rows kernels of `(8, 64)`, `(16, 32)` and `(32, 16)`. The adapter refuses the
+group on any other target before it loads a kernel.
 
 The 896-expert top-16 group's kernels (`MODE_GROUPS["situ_top16"]`) are
 generated for SM100a, SM103a and SM107a: the SiTU-GLU forward, context-free
@@ -557,7 +557,7 @@ across communication-SM splits and under CUDA Graph replay.
 
   | Group | Layouts (EP, local experts) | Top-k | Position | Activation | Weight gradients | `router_weight_gradient` | `shared_expert` | Routed weights | Targets |
   | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-  | `"scaled_top10"` | `(8, 64)`, `(16, 32)` (512 routed experts) | 10 | `"after_down"` | plain SwiGLU | FP32 | `"direct"` | `"scaled"` | BF16 | SM100a, SM103a, SM107a |
+  | `"scaled_top10"` | `(8, 64)`, `(16, 32)`, `(32, 16)` (512 routed experts) | 10 | `"after_down"` | plain SwiGLU | FP32 | `"direct"` | `"scaled"` | BF16 | SM100a, SM103a, SM107a |
   | `"situ_top16"` | `(64, 14)`, `(32, 28)` (896 routed experts) | 16 | `"after_down"` | SiTU-GLU | FP32 | `"direct"` | `"none"` | BF16 | SM100a, SM103a, SM107a |
 
   Recompute (`recompute_forward_context`) is unchanged by the router-weight
@@ -1228,7 +1228,7 @@ SM103a or SM107a device):
   the gates near the FP32 normal range of `sigmoid(gate)` (about -88.5 to
   -80.5): accuracy in the FP32 subnormal range of `sigmoid` is not required.
   Multi-GPU runs at `(64, 14)` are a separate test.
-- The later layouts of the two groups (`(16, 32)`; `(32, 28)`): in
+- The later layouts of the two groups (`(16, 32)`, `(32, 16)`; `(32, 28)`): in
   `test_mok_bf16.py` the adapter's step at each layout emulated on one GPU with
   every route on rank 0 (distinct experts per token): the context and
   checkpointed steps bit for bit, run to run and under CUDA Graph replay, a

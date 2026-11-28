@@ -425,8 +425,9 @@ def prepare_mok_bf16(
     4/8/16/32/64 and 288 routed experts at EP 8/32 with top-k 2 or 8
     (``"after_down"``), 384 routed experts at EP 4/8/16/32/64 ((4, 96),
     (8, 48), (16, 24), (32, 12), (64, 6)) with top-k 6 (``"before_down"``),
-    512 routed experts at EP 8/16 ((8, 64), (16, 32)) with top-k 10, which
-    runs only with ``"after_down"``, plain SwiGLU, ``fp32_wgrad=True``,
+    512 routed experts at EP 8/16/32 ((8, 64), (16, 32), (32, 16)) with
+    top-k 10, which runs only with ``"after_down"``, plain SwiGLU,
+    ``fp32_wgrad=True``,
     ``router_weight_gradient="direct"``, ``shared_expert="scaled"`` and BF16
     routed weights, and 896 routed experts at EP 64/32 ((64, 14), (32, 28))
     with top-k 16, which runs only with ``"after_down"``,

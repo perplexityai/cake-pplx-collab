@@ -22,9 +22,9 @@ combine, router-weight gradient `dot(dh, a)`): top-k 6 over 384 routed experts a
 and `sm_107a`; `recompute_forward_context` then takes the router weights. The explicit modes
 `router_weight_gradient="direct"` (a router-weight gradient `dot(dh, h)` from the unscaled `dy`, defined at a zero
 weight) and `shared_expert="scaled"` (a per-token FP32 shared-expert scale `s`, `y = s * S(x) + sum_k w_k E_k(x)`,
-with its gradient as a ninth `backward` item) run 512 routed experts at `(8, 64)` and `(16, 32)`, top-k 10, plain SwiGLU,
-FP32 weight gradients and BF16 routed weights on `sm_100a`, `sm_103a` and `sm_107a`; their defaults keep every
-earlier bit.
+with its gradient as a ninth `backward` item) run 512 routed experts at `(8, 64)`, `(16, 32)` and `(32, 16)`, top-k
+10, plain SwiGLU, FP32 weight gradients and BF16 routed weights on `sm_100a`, `sm_103a` and `sm_107a`; their defaults
+keep every earlier bit.
 With MXFP8 routed experts, two options are off by default (section MXFP8 options):
 `quantize_mok_mxfp8_weights(..., blocks="32x32")` gives each 32 x 32 block of a routed weight one scale byte, so the
 backward GEMMs read the forward's dequantized weight; `prepare_mok_bf16(mxfp8_transposed="requantized")` forms the
@@ -54,7 +54,7 @@ resident on other streams. Every reduction runs in a fixed order; atomics act on
 | `torch` | with `torch.distributed` and symmetric memory (multicast) |
 | Process group | Initialized, its CUDA device current; all ranks in one peer-accessible NVLink domain with multicast |
 | EP sizes | 1, 4, 8, 16, 32, 64 (EP1 uses plain tensors) |
-| Scheduler layouts `(EP, local experts)` | `(1, 4)`, `(4, 4)`, `(4, 64)`, `(8, 32)`, `(16, 16)`, `(32, 8)`, `(64, 4)`, `(8, 36)`, `(32, 9)`; top-k 2 or 8. `router_weight_position="before_down"`: `(4, 96)`, `(8, 48)`, `(16, 24)`, `(32, 12)`, `(64, 6)` at top-k 6, `(1, 4)` and `(4, 4)` at top-k 2. `(8, 64)`, `(16, 32)` at top-k 10 with `router_weight_gradient="direct"` and `shared_expert="scaled"`. `(64, 14)`, `(32, 28)` at top-k 16 with `activation="situ_glu"`, `shared_expert="none"` and `router_weight_gradient="direct"` |
+| Scheduler layouts `(EP, local experts)` | `(1, 4)`, `(4, 4)`, `(4, 64)`, `(8, 32)`, `(16, 16)`, `(32, 8)`, `(64, 4)`, `(8, 36)`, `(32, 9)`; top-k 2 or 8. `router_weight_position="before_down"`: `(4, 96)`, `(8, 48)`, `(16, 24)`, `(32, 12)`, `(64, 6)` at top-k 6, `(1, 4)` and `(4, 4)` at top-k 2. `(8, 64)`, `(16, 32)`, `(32, 16)` at top-k 10 with `router_weight_gradient="direct"` and `shared_expert="scaled"`. `(64, 14)`, `(32, 28)` at top-k 16 with `activation="situ_glu"`, `shared_expert="none"` and `router_weight_gradient="direct"` |
 | Schedule capacity | `schedule_capacity_multiplier` at least `ceil((min(topk, E) * T * EP + E * 255) / (T * topk)) / EP` holds every routing (`E` local experts, `T` the workspace's physical source rows, at least the largest rank's source rows or `source_capacity`); the same multiplier on every rank, computed from a row bound all ranks agree on (the bound decreases as `T` grows); no upper bound |
 
 ## Builds
