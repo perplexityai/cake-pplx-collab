@@ -168,18 +168,50 @@ _FACTORY_COMM_SMS = (40, 40)
 # 33.91 / 53.72, 56 / 40 34.23 / 54.31, 56 / 48 33.49 / 53.59, 64 / 48
 # 33.81 / 53.54. The context recompute launch keeps the COMM_SMS row: it
 # rebuilds one macro batch, which slows as the forward count grows (0.818 ms at
-# 20, 0.862 ms at 56). B300 ((10, 3), 148 SMs) keeps 24 / 40: every forward
-# count measured above 24 (40 to 56, backward 40 or 48) made the checkpointed
-# step faster but its backward slower, the faster forward leaving the GPU at a
-# lower SM clock under its power limit (48 / 48, 32,768 tokens per rank,
-# uniform: checkpointed step 41.97 -> 38.90 ms, backward 26.17 -> 27.14 ms).
-# B200 ((10, 0), 148 SMs) keeps 40 / 40 (48 / 40 measured: checkpointed step
-# within 0.7 % of 40 / 40) and GB200 ((10, 0), 152 SMs) keeps 40 / 40 (no other
-# count measured).
+# 20, 0.862 ms at 56).
+#
+# The rows of 0.4.5 were chosen by one rule on each device and shape: forward /
+# backward counts measured on one node (two 4-GPU trays of one NVLink domain on
+# GB200), EP8, six rounds interleaved with the previous split and a second
+# process of it, order reversed in every second round, the slowest rank's
+# median of timed repetitions 1-20; a count qualifies when none of its rows
+# (forward, context recompute, backward, checkpointed step) is slower than the
+# previous split beyond the noise band of the identical processes and at least
+# one row is faster; the lowest geometric mean of the checkpointed-step ratios
+# wins (a tie within the noise band goes to the lower forward geometric mean).
+# The B300 56 / 40 row for H 4096 / I 1024 / top-k 10 is the one exception:
+# it is kept by an explicit owner decision with four of its rows, all of the
+# backward right after a forward, slower.
+# - B200 ((10, 0), 148 SMs) BF16 EP8 20 / 40 for H 5120 / I 2304 / top-k 6
+#   (the 384-expert layout (8, 48), router weight before the down
+#   projection), from forward counts 12, 14, 16 and 20 with backward 40:
+#   uniform routing, the hottest rank at 1.5x (4,096 and 16,384 tokens per
+#   rank) and at 2.0x, 3.0x and 5.6x (16,384), ragged source rows, CUDA Graph
+#   replay. Fewer forward SMs measured slower from 3.0x. The imbalance split
+#   (24 / 28 from 4.0x) still replaces the row under skew, and the source
+#   split (16) still applies below it. B300 ((10, 3), 148 SMs) has no row for
+#   this shape and keeps 24 / 40: with 20 / 40 its backward right after a
+#   forward at 5.6x measured slower in the steady window.
+# - GB200 ((10, 0), 152 SMs) BF16 EP8 56 / 48 for H 4096 / I 1024 / top-k 10
+#   (8, 64), from 40 / 48, 48 / 40, 48 / 48, 56 / 40 and 56 / 48 at 32,768
+#   tokens per rank, uniform and with rank 0's experts at 1.75x.
+# - B300 ((10, 3), 148 SMs) BF16 EP8 56 / 40 for H 4096 / I 1024 / top-k 10
+#   (8, 64): the forward count only (the backward keeps 40). Its forward and
+#   checkpointed step are faster at 16,384 and 32,768 tokens per rank, uniform
+#   and at 1.75x; the backward right after a forward is slower on some rows
+#   (the backward launch is unchanged; after an idle wait it measured the same
+#   as 24 / 40; the mechanism is not separately confirmed).
 # Absolute times against the previous version: backend README, "Fixed split
 # per launch shape".
 SHAPE_COMM_SMS = {
-    (10, 3): {152: {"bf16": {8: {(4096, 1024, 10): (56, 48)}}}},
+    (10, 0): {
+        148: {"bf16": {8: {(5120, 2304, 6): (20, 40)}}},
+        152: {"bf16": {8: {(4096, 1024, 10): (56, 48)}}},
+    },
+    (10, 3): {
+        148: {"bf16": {8: {(4096, 1024, 10): (56, 40)}}},
+        152: {"bf16": {8: {(4096, 1024, 10): (56, 48)}}},
+    },
 }
 
 # Per-launch source split of the router-weight-before-down BF16 forward
@@ -504,9 +536,11 @@ def create_mok_bf16_workspace(
     workspace's ``hidden_size`` and ``topk``, the routed intermediate width)
     has a measured row of the device, routed precision and group size, which
     takes that row's count (:func:`resolve_shape_comm_sms`,
-    :data:`SHAPE_COMM_SMS`, ``MoKConfig.shape_comm_sms``; BF16 H 4096 / I 1024
-    / top-k 10 at EP8, the 512-expert layout (8, 64): GB300 56 / 48; a
-    context recompute launch keeps the row above). The returned
+    :data:`SHAPE_COMM_SMS`, ``MoKConfig.shape_comm_sms``; BF16 at EP8:
+    H 4096 / I 1024 / top-k 10, the 512-expert layout (8, 64): GB300 and
+    GB200 56 / 48, B300 56 / 40; H 5120 / I 2304 / top-k 6, the 384-expert
+    layout (8, 48): B200 20 / 40; a context recompute launch keeps
+    the row above). The returned
     ``fwd_num_comm_sms`` / ``bwd_num_comm_sms`` hold the row of ``precision``;
     on such a config a ``dataclasses.replace`` of ``fwd_num_comm_sms`` /
     ``bwd_num_comm_sms`` alone changes no launch: create the workspace with

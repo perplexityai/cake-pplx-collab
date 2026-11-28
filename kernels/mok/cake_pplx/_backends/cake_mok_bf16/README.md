@@ -383,7 +383,12 @@ above about `2^24`. The hidden value takes both bounds scaled by
 `situ_beta * situ_lb` of at least `2^-119` (about `1.5e-36`): below about
 `2^-119.9` that reciprocal flushes to zero and the hidden value of tiny gates
 and ups is 0. The adapter refuses a smaller product with `ValueError`
-(`check_situ_parameters`, `SITU_BETA_LB_MIN`).
+(`check_situ_parameters`, `SITU_BETA_LB_MIN`). The kernels are built with
+flush to zero. Their quotient `2.88539 / s` (`s` is `situ_beta` or
+`situ_lb`) reads an FP32-subnormal `s` as 0, so the quotient is infinite, as
+past the FP32 range. It is 0 for an `s` above `2.88539 * 2^126` (about
+`2.45e38`), which makes every hidden value 0. The adapter refuses both with
+`ValueError` (`SITU_FP32_MIN_NORMAL`, `2^-126`).
 
 The locality-domain (`_domain`) builds of the MoK kernels, which split work
 over the two dies of an SM107a GPU, are not shipped: this package has no such
@@ -541,7 +546,7 @@ across communication-SM splits and under CUDA Graph replay.
   | --- | --- | --- |
   | `router_weight_gradient` (`ROUTER_WEIGHT_GRADIENTS`) | `"quotient"`, `"direct"` | `"after_down"` router-weight gradient. `"quotient"`: `dh = BF16(BF16(w * dy) Wd)`, `d_w = dot(dh, h) / w`, zero at a zero weight. `"direct"`: `dh = BF16(dy Wd)` from the unscaled `dy`, activation gradient `w * dh` in FP32, `d_w = dot(dh, h)` (FP32, fixed order), defined at a zero weight; the down-projection weight gradient reads `BF16(w * dy)` in both, bit for bit the same |
   | `shared_expert` (`SHARED_EXPERT_MODES`) | `"unscaled"`, `"scaled"`, `"none"` | `"scaled"`: `forward` and `backward` take `shared_scale` (FP32 `[tokens]`, the forward's on the backward), `y = BF16(s * BF16(S(x)) + sum_k w_k o_k)` in FP32; `dx` adds `s * dx_shared` (`dx_shared` from the unscaled `dy`); the shared down-projection weight gradient reads `BF16(s * dy)`, the shared gate/up weight gradients `BF16(s * x)`; `backward` returns `d_shared_scale = dot(dh_shared, hidden_shared)` (FP32, fixed order; `dh_shared = BF16(dy Wd_shared)`) as a ninth item, defined at `s = 0`. `s = 1` gives the unscaled values bit for bit. `"none"`: no shared expert, `y = BF16(sum_k w_k o_k)` in FP32 from zero; every call takes `None` for the shared weights, the forward context's shared fields are `None`, and `backward` takes and returns the three routed FP32 accumulators and returns `None` for the three shared weight gradients |
-  | `activation` (`ACTIVATIONS`) | `"swiglu"`, `"clamped_swiglu"`, `"situ_glu"` | `"clamped_swiglu"` is `clamped_swiglu=True`; `"situ_glu"`: `beta tanh(gate / beta) sigmoid(gate) lb tanh(up / lb)`, `situ_beta` and `situ_lb` (finite positive Python floats, rounded to the FP32 kernel values; `2.88539 / beta`, `2.88539 / lb` and `beta * lb` finite in FP32, and `beta * lb` at least `2^-119`, else `ValueError`) on every `forward`, `recompute_forward_context` and `backward`, `swiglu_limit=None` |
+  | `activation` (`ACTIVATIONS`) | `"swiglu"`, `"clamped_swiglu"`, `"situ_glu"` | `"clamped_swiglu"` is `clamped_swiglu=True`; `"situ_glu"`: `beta tanh(gate / beta) sigmoid(gate) lb tanh(up / lb)`, `situ_beta` and `situ_lb` (finite positive Python floats, rounded to the FP32 kernel values; `2.88539 / beta`, `2.88539 / lb` and `beta * lb` finite in FP32, `beta`, `lb`, `2.88539 / beta` and `2.88539 / lb` at least `2^-126`, and `beta * lb` at least `2^-119`, else `ValueError`) on every `forward`, `recompute_forward_context` and `backward`, `swiglu_limit=None` |
   | `mxfp8_transposed` (`MXFP8_TRANSPOSED_MODES`) | `"source"`, `"requantized"` | The token-direction MXFP8 copies of the routed `x` and SwiGLU activation `h` (the forward context's transposed fields) that the routed weight gradients read. `"source"`: `x_t = Q_tok(x)`, `h_t = Q_tok(h)` from the BF16 values. `"requantized"`: `x_t = Q_tok(DQ(Q_feat(x)))`, `h_t = Q_tok(DQ(Q_feat(h)))`, from the BF16 dequantized values (`DQ(code, byte) = code * 2**(byte - 127)`, exact below `2**128`; an element within 3 % of the BF16 maximum dequantizes to `2**128`, which is infinity in BF16 and gives its token block byte 254 in the `"requantized"` copy: a NaN code for it and code 0 for the block's other elements) of the feature-direction copies the forward GEMMs read, with the recipe's round to nearest; in the forward, `recompute_forward_context` and the backward's replay of later macro batches. Every other output and saved tensor keeps the `"source"` bits; the routed weight gradients read the other copies. MXFP8 routed weights only (`forward`, `recompute_forward_context`, `backward`, `prepare` and `prepare_recompute` refuse BF16 routed weights); `"after_down"` outside the groups; SM100a and SM103a. The adapter compiles the MXFP8 kernels of its SwiGLU variant at construction |
 
   A configuration that uses a layout, the top-k or a mode of a kernel group
@@ -857,6 +862,22 @@ across communication-SM splits and under CUDA Graph replay.
   the 512-expert layout at 2,048 and 32,768 tokens per rank (uniform) and at
   32,768 with the hot rank at 1.75x, on GB300.
 
+  Rows (BF16 routed weights, EP8; the forward and backward launches of the
+  shape take the row, the context recompute launch keeps the previous split):
+
+  | device | shape | layout | row | previous split | since |
+  | --- | --- | --- | --- | --- | --- |
+  | GB300 (152 SMs) | H 4096 / I 1024 / top 10 | `(8, 64)` | 56 / 48 | 20 / 24 | 0.4.1 |
+  | GB200 (152 SMs) | H 4096 / I 1024 / top 10 | `(8, 64)` | 56 / 48 | 40 / 40 | 0.4.5 |
+  | B300 (148 SMs) | H 4096 / I 1024 / top 10 | `(8, 64)` | 56 / 40 | 24 / 40 | 0.4.5 |
+  | B200 (148 SMs) | H 5120 / I 2304 / top 6, router weight before the down projection | `(8, 48)` | 20 / 40 | 40 / 40 | 0.4.5 |
+
+  On B200 the imbalance split (24 / 28 from 4.0x) still replaces the `(8, 48)`
+  row under skew, and the source split (16) still applies below it. B300 has
+  no `(8, 48)` row and keeps 24 / 40: with 20 / 40 its backward right after a
+  forward at 5.6x measured slower in the steady window. Rubin and every other
+  device, shape, precision and group size have no shape row.
+
   Row: GB300 (152 SMs) BF16 EP8, H 4096 / I 1024 / top 10 (the 512-expert
   layout `(8, 64)`): 56 / 48. The `COMM_SMS` row 20 / 24 was chosen at I 2048
   and top 8, where a routed row carries twice the expert GEMM work per byte it
@@ -865,11 +886,11 @@ across communication-SM splits and under CUDA Graph replay.
   domain, EP8, 32,768 tokens per rank, uniform / hot rank 1.75x, two rounds
   interleaved with 20 / 24, slowest rank's median: 20 / 24 46.24 / 72.74 ms,
   48 / 48 33.91 / 53.72, 56 / 40 34.23 / 54.31, 56 / 48 33.49 / 53.59, 64 / 48
-  33.81 / 53.54. B300 (148 SMs) keeps 24 / 40: 48 / 48 made the checkpointed
-  step faster (41.97 -> 38.90 ms, uniform, 32,768 tokens per rank) but the
-  backward slower (26.17 -> 27.14 ms; the faster forward leaves the GPU at a
-  lower SM clock under its power limit), and so did every forward count from 40
-  to 56 with a backward count of 40 or 48. B200 and GB200 keep 40 / 40.
+  33.81 / 53.54. In 0.4.1 B300 (148 SMs) kept 24 / 40: 48 / 48 made the
+  checkpointed step faster (41.97 -> 38.90 ms, uniform, 32,768 tokens per rank)
+  but the backward slower (26.17 -> 27.14 ms), and so did every forward count
+  from 40 to 56 with a backward count of 40 or 48; B200 and GB200 kept
+  40 / 40.
 
   Table: this package against 0.4.0 (main) on GB300, EP8 on two trays of one
   NVLink domain, the 512-expert layout (H 4096 / I 1024, top 10, direct router
@@ -884,7 +905,7 @@ across communication-SM splits and under CUDA Graph replay.
   checkpointed step = schedule, forward without context, context recompute and
   backward. The two 0.4.0 processes differ by at most 0.32 % on every row
   except the context recompute (at most 3.3 % of a 0.8 ms launch). On GB200,
-  B200 and B300 this package launches the same splits as 0.4.0.
+  B200 and B300 0.4.1 launched the same splits as 0.4.0.
 
   | routing | tokens per rank | operation | main (ms) | this package (ms) | change |
   | --- | --- | --- | --- | --- | --- |
@@ -904,6 +925,83 @@ across communication-SM splits and under CUDA Graph replay.
   | 1.75x hot rank | 16,384 | backward | 23.446 | 18.707 | -20.2 % (band 0.6 %, faster) |
   | 1.75x hot rank | 16,384 | context recompute | 0.725 | 0.724 | -0.1 % (band 2.8 %, noise) |
   | 1.75x hot rank | 16,384 | checkpointed step | 35.919 | 26.843 | -25.3 % (band 0.6 %, faster) |
+
+  Tables: 0.4.5 against 0.4.4 (main) for the three rows that 0.4.5 adds, EP8 on
+  B200 nodes, on two GB200 trays of one NVLink domain and on B300 nodes (each
+  row from one node or tray pair). On each device both versions load GPU
+  programs with the same SASS (compared per program before timing) and give the
+  same bits: every rank's output digests are the same at 0.4.4 and 0.4.5 for
+  three configurations on B200 and four on GB200 and on B300, and those lines
+  repeat their outputs bitwise. One process per version and configuration; six
+  rounds of 0.4.4, this package and a second 0.4.4 process interleaved on the
+  same GPUs, the order reversed in every second round; eager, no CPU binding, 3
+  warm-up and 60 timed repetitions; value = the slowest rank's median of
+  repetitions 1-20, median over the rounds; change = printed package ms /
+  printed main ms - 1; steady = the same for repetitions 41-60. 'faster' = the
+  95 % interval of the mean per-round difference (package minus main) is below
+  zero and the mean is beyond the bound of the two 0.4.4 processes; 'slower' =
+  that interval, or a per-round rule (slower in every round, with the median
+  difference beyond the largest difference of the two 0.4.4 processes, against
+  the first or against their mean), says slower; 'parity' otherwise. Forward =
+  schedule and forward without context; backward = a backward right after an
+  untimed forward that saves its context; checkpointed step = schedule, forward,
+  context recompute and backward.
+
+  B200 (148 SMs), the `(8, 48)` layout (H 5120 / I 2304, 384 experts, top 6,
+  clamped SwiGLU, router weight before the down projection, BF16 routed weights,
+  FP32 weight gradients, macro batch 262,144): 0.4.4 launches 40 / 40, this
+  package 20 / 40; at 5.6x both launch the imbalance split 24 / 28. The uniform,
+  1.5x and ragged rows come from one node, the 2.0x, 3.0x and 5.6x rows from a
+  second node.
+
+  | routing | tokens per rank | forward main (ms) | this package (ms) | change | backward main (ms) | this package (ms) | change | checkpointed step main (ms) | this package (ms) | change |
+  | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+  | uniform | 4,096 | 2.452 | 2.366 | -3.5 % (parity; steady -3.0 %, parity) | 5.534 | 5.530 | -0.1 % (parity; steady +0.1 %, parity) | 9.230 | 9.181 | -0.5 % (faster; steady -0.8 %, faster) |
+  | 1.5x hot rank | 4,096 | 3.075 | 2.899 | -5.7 % (faster; steady -4.8 %, faster) | 6.636 | 6.633 | -0.0 % (parity; steady +0.0 %, parity) | 11.424 | 11.295 | -1.1 % (faster; steady -1.4 %, faster) |
+  | ragged | 2,048-6,143 | 2.187 | 2.073 | -5.2 % (faster; steady -2.7 %, faster) | 5.261 | 5.258 | -0.1 % (parity; steady +0.2 %, parity) | 8.532 | 8.468 | -0.8 % (faster; steady -0.9 %, faster) |
+  | uniform | 16,384 | 7.533 | 7.122 | -5.5 % (faster; steady -4.8 %, faster) | 14.781 | 14.812 | +0.2 % (parity; steady +0.0 %, parity) | 27.028 | 26.538 | -1.8 % (faster; steady -1.9 %, faster) |
+  | 1.5x hot rank | 16,384 | 10.301 | 9.821 | -4.7 % (faster; steady -5.2 %, faster) | 19.946 | 19.973 | +0.1 % (parity; steady +0.2 %, parity) | 36.590 | 35.951 | -1.7 % (faster; steady -2.1 %, faster) |
+  | ragged | 8,192-24,575 | 6.478 | 6.471 | -0.1 % (parity; steady +0.0 %, parity) | 13.465 | 13.458 | -0.1 % (parity; steady -0.0 %, parity) | 23.863 | 23.903 | +0.2 % (parity; steady +0.1 %, parity) |
+  | 2.0x hot rank | 16,384 | 12.788 | 12.191 | -4.7 % (faster; steady -4.9 %, faster) | 24.913 | 24.791 | -0.5 % (parity; steady +0.7 %, parity) | 45.926 | 44.689 | -2.7 % (faster; steady -1.6 %, faster) |
+  | 3.0x hot rank | 16,384 | 18.387 | 17.390 | -5.4 % (faster; steady -5.5 %, faster) | 41.258 | 41.868 | +1.5 % (parity; steady +2.7 %, parity) | 71.724 | 70.340 | -1.9 % (parity; steady -2.1 %, faster) |
+  | 5.6x hot rank | 16,384 | 31.784 | 31.534 | -0.8 % (parity; steady -0.2 %, parity) | 84.493 | 84.508 | +0.0 % (parity; steady -0.3 %, parity) | 130.005 | 130.652 | +0.5 % (parity; steady +0.3 %, parity) |
+
+  GB200 (152 SMs), two trays, the 512-expert layout `(8, 64)` (H 4096 / I 1024,
+  top 10, direct router weight gradient, scaled shared expert, BF16 routed
+  weights, FP32 weight gradients, macro batch 32,768): 0.4.4 launches 40 / 40,
+  this package 56 / 48. The uniform 0, 1 and 32,736 and the ragged rows come
+  from a second run on the same two trays.
+
+  | routing | tokens per rank | forward main (ms) | this package (ms) | change | backward main (ms) | this package (ms) | change | checkpointed step main (ms) | this package (ms) | change |
+  | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+  | uniform | 16,384 | 5.541 | 4.993 | -9.9 % (faster; steady -9.2 %, faster) | 12.640 | 12.218 | -3.3 % (faster; steady -3.4 %, faster) | 18.803 | 17.921 | -4.7 % (faster; steady -4.7 %, faster) |
+  | uniform | 32,768 | 10.927 | 9.805 | -10.3 % (faster; steady -10.2 %, faster) | 25.922 | 24.757 | -4.5 % (faster; steady -4.0 %, faster) | 37.397 | 35.425 | -5.3 % (faster; steady -5.5 %, faster) |
+  | 1.75x hot rank | 32,768 | 16.215 | 15.082 | -7.0 % (faster; steady -6.9 %, faster) | 40.945 | 39.337 | -3.9 % (faster; steady -4.3 %, faster) | 57.812 | 55.293 | -4.4 % (faster; steady -4.2 %, faster) |
+  | uniform | 0 | 0.443 | 0.440 | -0.7 % (parity; steady -1.7 %, parity) | 0.476 | 0.472 | -0.8 % (parity; steady -1.1 %, parity) | 0.989 | 0.996 | +0.7 % (parity; steady +0.1 %, parity) |
+  | uniform | 1 | 0.543 | 0.542 | -0.2 % (parity; steady -0.2 %, parity) | 0.874 | 0.867 | -0.8 % (parity; steady -0.1 %, parity) | 1.410 | 1.399 | -0.8 % (parity; steady -0.2 %, parity) |
+  | uniform | 32,736 | 10.946 | 9.846 | -10.0 % (faster; steady -10.1 %, faster) | 25.880 | 24.816 | -4.1 % (faster; steady -4.4 %, faster) | 37.339 | 35.274 | -5.5 % (faster; steady -5.0 %, faster) |
+  | ragged | 8,191-32,767 | 6.799 | 6.655 | -2.1 % (faster; steady -2.0 %, faster) | 14.869 | 14.415 | -3.1 % (faster; steady -3.3 %, faster) | 22.416 | 21.863 | -2.5 % (faster; steady -2.6 %, faster) |
+
+  B300 (148 SMs), the same 512-expert layout: 0.4.4 launches 24 / 40, this
+  package 56 / 40 (the backward count is unchanged). Rows from two nodes; the
+  1.75x hot rank at 32,768 tokens per rank ran on both. The backward right after
+  a forward is slower at that point on both nodes and in the steady window at
+  1.75x / 16,384 and uniform 32,768. After 0.5 s of idle the same backward is at
+  parity on every row, so the slowdown follows the faster forward before it, not
+  the backward launch; at 1.75x / 32,768 the software power cap is active for a
+  larger share of that backward's samples with this package. The mechanism is
+  not separately confirmed. The checkpointed step, which includes that backward,
+  is faster on every row. This row is kept by an explicit owner decision with
+  these four backward rows slower; the B200 and GB200 rows have no slower row.
+
+  | routing | tokens per rank | forward main (ms) | this package (ms) | change | backward main (ms) | this package (ms) | change | backward after 0.5 s idle main (ms) | this package (ms) | change | checkpointed step main (ms) | this package (ms) | change |
+  | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+  | uniform | 16,384 | 7.162 | 4.962 | -30.7 % (faster; steady -31.0 %, faster) | 12.624 | 12.631 | +0.1 % (parity; steady +0.1 %, parity) | 12.620 | 12.635 | +0.1 % (parity; steady -0.0 %, parity) | 20.331 | 18.289 | -10.0 % (faster; steady -10.1 %, faster) |
+  | 1.75x hot rank | 16,384 | 11.024 | 7.842 | -28.9 % (faster; steady -28.8 %, faster) | 20.043 | 20.055 | +0.1 % (parity; steady +1.3 %, slower) | 19.847 | 19.853 | +0.0 % (parity; steady +0.0 %, parity) | 31.640 | 28.702 | -9.3 % (faster; steady -9.0 %, faster) |
+  | ragged | 8,191-32,767 | 8.058 | 6.647 | -17.5 % (faster; steady -17.3 %, faster) | 14.981 | 14.982 | +0.0 % (parity; steady -0.0 %, parity) | 14.973 | 14.964 | -0.1 % (parity; steady -0.1 %, parity) | 23.754 | 22.372 | -5.8 % (faster; steady -5.8 %, faster) |
+  | 1.75x hot rank, node 1 | 32,768 | 21.697 | 15.192 | -30.0 % (faster; steady -29.8 %, faster) | 40.580 | 41.404 | +2.0 % (slower; steady +2.0 %, slower) | 39.007 | 39.025 | +0.0 % (parity; steady +0.0 %, parity) | 63.361 | 58.155 | -8.2 % (faster; steady -8.3 %, faster) |
+  | uniform | 32,768 | 14.172 | 9.720 | -31.4 % (faster; steady -31.5 %, faster) | 25.065 | 25.150 | +0.3 % (parity; steady +1.1 %, slower) | 24.708 | 24.699 | -0.0 % (parity; steady -0.1 %, parity) | 40.049 | 36.249 | -9.5 % (faster; steady -10.0 %, faster) |
+  | 1.75x hot rank, node 2 | 32,768 | 21.707 | 15.295 | -29.5 % (faster; steady -29.4 %, faster) | 40.549 | 41.280 | +1.8 % (slower; steady +2.1 %, slower) | 39.035 | 39.039 | +0.0 % (parity; steady -0.0 %, parity) | 63.223 | 58.048 | -8.2 % (faster; steady -7.9 %, faster) |
 
 - Mini-batches are multiples of 256; macro-batches are multiples of the
   mini-batch. Schedule capacity must hold every padded route; overflow traps.
