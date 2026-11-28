@@ -1037,6 +1037,35 @@ DYN_CP_SHORT_TOKENS = {2: 4096, 4: 4096, 8: 2048}
 DYN_CP_LONG_UNIT = 56
 DYN_CP_LONG_WORLD = 2
 DYN_CP_LONG_TOKENS = 16384
+# The table's measured parts (:func:`dyn_cp_v2_applies`): a call on one of these (architecture, SM count) devices with
+# one of their world sizes, at most ``DYN_CP_MAX_CHANNELS`` channels and at most ``DYN_CP_V2_MAX_TOKENS`` tokens on
+# the rank also gets, in this order (:func:`dyn_cp_units`):
+# - ``DYN_CP_V2_UNIT``-token units on the ``DYN_CP_V2_UNIT_ARCHES`` with world sizes ``DYN_CP_V2_UNIT_WORLDS`` from
+#   ``DYN_CP_V2_UNIT_TOKENS`` tokens while a lane has at most ``DYN_CP_V2_UNIT_MAX_NL`` units and its run is no longer
+#   than the ``DYN_UNIT`` plan's (VR200: 16384 tokens give 2 units of 40 per lane instead of 64-token lanes of 2 units
+#   with 56-token lanes left idle);
+# - ``DYN_CP_LONG_UNIT``-token units with world size ``DYN_CP_LONG_WORLD`` from ``DYN_CP_V2_LONG_TOKENS`` tokens, and
+#   on the ``DYN_CP_V2_LONG4_ARCHES`` with world size ``DYN_CP_V2_LONG4_WORLD`` from ``DYN_CP_LONG_TOKENS`` tokens,
+#   both with the lane-run check;
+# - without a table unit: the ``DYN_IDLE_UNIT`` plan only when its lanes' runs are no longer than the ``DYN_UNIT``
+#   plan's (the idle-unit branch re-took the 56-token plan the lane-run check had refused, for example 18432 tokens
+#   on B200 and GB300 and 24576 tokens on VR200 at world size 2: runs of 168 tokens against 128).
+# Measured on 0.2.23 against its plan on 148-SM B200, 152-SM GB300 and 212-SM VR200 (backward and checkpointed
+# backward; contiguous, zigzag, three-tensor and CUDA Graph replay calls); every other call keeps the plan above.
+DYN_CP_V2_PARTS = {
+    ("sm_100a", 148): (2, 4, 8),
+    ("sm_103a", 152): (2, 4),
+    ("sm_107a", 212): (2, 4),
+}
+DYN_CP_V2_MAX_TOKENS = 32768
+DYN_CP_V2_UNIT = 40
+DYN_CP_V2_UNIT_ARCHES = ("sm_107a",)
+DYN_CP_V2_UNIT_WORLDS = (2, 4)
+DYN_CP_V2_UNIT_TOKENS = 16384
+DYN_CP_V2_UNIT_MAX_NL = 2
+DYN_CP_V2_LONG_TOKENS = 8192
+DYN_CP_V2_LONG4_ARCHES = ("sm_103a",)
+DYN_CP_V2_LONG4_WORLD = 4
 
 
 def route_applies(*, device_capability: Sequence[int], kind: str) -> bool:
@@ -1218,8 +1247,64 @@ def dyn_cp_unit(world_size: int, S: int, C: int) -> int | None:
     return None
 
 
+def dyn_cp_v2_applies(
+    arch: str | None, sms: int, world_size: int | None, S: int, C: int
+) -> bool:
+    """Whether a call is on one of the table's measured parts (:data:`DYN_CP_V2_PARTS`): a known architecture and
+    world size, an (architecture, SM count) device listed with that world size, at most
+    :data:`DYN_CP_MAX_CHANNELS` channels and 1 to :data:`DYN_CP_V2_MAX_TOKENS` tokens on the rank."""
+
+    if arch is None or world_size is None:
+        return False
+    worlds = DYN_CP_V2_PARTS.get((arch, int(sms)))
+    return (
+        worlds is not None
+        and int(world_size) in worlds
+        and int(C) <= DYN_CP_MAX_CHANNELS
+        and 1 <= int(S) <= DYN_CP_V2_MAX_TOKENS
+    )
+
+
+def dyn_cp_units(
+    world_size: int | None,
+    S: int,
+    C: int,
+    *,
+    arch: str | None = None,
+    sms: int | None = None,
+) -> tuple[int, ...]:
+    """The context-parallel table's units for a call, in the order :func:`dyn_plan` tries them: the unit of
+    :func:`dyn_cp_unit`, or on the measured parts (:func:`dyn_cp_v2_applies`) :data:`DYN_CP_V2_UNIT` and then
+    :data:`DYN_CP_LONG_UNIT` where they apply; ``()`` without ``world_size`` or a unit."""
+
+    if world_size is None:
+        return ()
+    world_size, S, C = int(world_size), int(S), int(C)
+    unit = dyn_cp_unit(world_size, S, C)
+    if (
+        sms is None
+        or unit == DYN_CP_SHORT_UNIT
+        or not dyn_cp_v2_applies(arch, sms, world_size, S, C)
+    ):
+        return () if unit is None else (unit,)
+    units = []
+    if (
+        arch in DYN_CP_V2_UNIT_ARCHES
+        and world_size in DYN_CP_V2_UNIT_WORLDS
+        and S >= DYN_CP_V2_UNIT_TOKENS
+    ):
+        units.append(DYN_CP_V2_UNIT)
+    if (world_size == DYN_CP_LONG_WORLD and S >= DYN_CP_V2_LONG_TOKENS) or (
+        arch in DYN_CP_V2_LONG4_ARCHES
+        and world_size == DYN_CP_V2_LONG4_WORLD
+        and S >= DYN_CP_LONG_TOKENS
+    ):
+        units.append(DYN_CP_LONG_UNIT)
+    return tuple(units)
+
+
 def dyn_plan(
-    S: int, C: int, sms: int, *, world_size: int | None = None
+    S: int, C: int, sms: int, *, world_size: int | None = None, arch: str | None = None
 ) -> dict[str, int]:
     """The overlapped main program's work plan on a device of ``sms`` SMs: ``P`` lanes per tile of
     :data:`DYN_TILE` channels (as many as give every SM's CTA a lane, at most one per unit of tokens and
@@ -1237,8 +1322,12 @@ def dyn_plan(
     ``4 * DYN_UNIT`` until a plan fits.  With ``world_size`` (the call's context-parallel world size), a unit of
     the context-parallel table (:func:`dyn_cp_unit`) comes first: its plan is taken when it fits the claim counts
     and, for :data:`DYN_CP_LONG_UNIT`, when its lanes' runs (``NL * M`` tokens) are no longer than those of the
-    :data:`DYN_UNIT` plan; otherwise, and with ``world_size=None``, the plan above.  A pure function of
-    ``(S, C, sms, world_size)``; ``dx`` does not depend on it."""
+    :data:`DYN_UNIT` plan; otherwise, and with ``world_size=None``, the plan above.  With ``arch`` too (the device's
+    architecture), a call on the table's measured parts (:func:`dyn_cp_v2_applies`) tries the units of
+    :func:`dyn_cp_units` in order (:data:`DYN_CP_V2_UNIT` also needs at most :data:`DYN_CP_V2_UNIT_MAX_NL` units per
+    lane, and both it and :data:`DYN_CP_LONG_UNIT` the lane-run check), and without a table unit takes the
+    :data:`DYN_IDLE_UNIT` plan only when its lanes' runs are no longer than the :data:`DYN_UNIT` plan's.  A pure
+    function of ``(S, C, sms, world_size, arch)``; ``dx`` does not depend on it."""
 
     S, C, sms = int(S), int(C), int(sms)
     if S < 1 or C < 1 or C > DYN_MAX_CHANNELS:
@@ -1261,22 +1350,30 @@ def dyn_plan(
         """The plan's CTAs without a lane of their own that has tokens."""
         return p["n_ctas"] - p["n_tiles"] * min(p["P"], -(-S // (p["NL"] * p["M"])))
 
-    cp_unit = None if world_size is None else dyn_cp_unit(world_size, S, C)
-    if cp_unit is not None:
+    def run(p: dict[str, int]) -> int:
+        """A lane's run: its ``NL`` units of ``M`` tokens."""
+        return p["NL"] * p["M"]
+
+    v2 = dyn_cp_v2_applies(arch, sms, world_size, S, C)
+    for cp_unit in dyn_cp_units(world_size, S, C, arch=arch, sms=sms):
         cp = plan_for(cp_unit)
-        if cp is not None and cp_unit == DYN_CP_LONG_UNIT:
+        if cp is not None and cp_unit != DYN_CP_SHORT_UNIT:
             ref = plan_for(DYN_UNIT)
-            if ref is None or cp["NL"] * cp["M"] > ref["NL"] * ref["M"]:
+            if ref is None or run(cp) > run(ref):
+                cp = None
+            elif cp_unit == DYN_CP_V2_UNIT and cp["NL"] > DYN_CP_V2_UNIT_MAX_NL:
                 cp = None
         if cp is not None:
             return cp
     base = plan_for(DYN_UNIT)
     if base is not None and -(-S // (base["NL"] * DYN_UNIT)) < base["P"]:
         # measured on GB300, GB200 and VR200: with idle lanes, 64-token units beat the larger units the cost picks;
-        # 56-token units that leave more CTAs idle absorb held SMs better (VR200, DYN_IDLE_UNIT)
+        # 56-token units that leave more CTAs idle absorb held SMs better (VR200, DYN_IDLE_UNIT); on the table's
+        # measured parts not when they lengthen the lanes' runs
         small = plan_for(DYN_IDLE_UNIT)
         if small is not None and idle_ctas(small) > idle_ctas(base):
-            return small
+            if not (v2 and run(small) > run(base)):
+                return small
         return base
     fits = [
         p for p in map(plan_for, range(DYN_UNIT, 2 * DYN_UNIT + 1, 8)) if p is not None
@@ -1438,6 +1535,8 @@ __all__ = [
     "device_arch",
     "dyn_applies",
     "dyn_cp_unit",
+    "dyn_cp_units",
+    "dyn_cp_v2_applies",
     "dyn_plan",
     "dyn_workspace_layout",
     "head_grid",
