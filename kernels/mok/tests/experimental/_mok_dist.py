@@ -1721,16 +1721,28 @@ def group_layout_overflow(ep, local_experts, topk, short):
     raises, inside the scheduler call or at the synchronization after it; that error is raised again as
     :data:`SCHEDULE_TRAPPED`.  Otherwise returns rank 0's routed rows and the capacity."""
     tokens = 4096
-    order = rand(ep * tokens, local_experts, generator=torch.Generator().manual_seed(4427)).argsort(-1)
+    order = rand(
+        ep * tokens, local_experts, generator=torch.Generator().manual_seed(4427)
+    ).argsort(-1)
     ids = order[:, :topk].int().reshape(ep, tokens, topk).to("cuda").contiguous()
-    padded = int((((torch.bincount(ids.flatten().long(), minlength=local_experts) + 255) // 256) * 256).sum())
+    padded = int(
+        (
+            (
+                (torch.bincount(ids.flatten().long(), minlength=local_experts) + 255)
+                // 256
+            )
+            * 256
+        ).sum()
+    )
     capacity = padded - 256 * short
     scheduler = kernels.MoKScheduler(ep, local_experts)
     try:
         total = scheduler(ids, capacity, 0)[2]
         torch.cuda.synchronize()
     except RuntimeError as error:
-        raise RuntimeError(f"{SCHEDULE_TRAPPED} at capacity {capacity} of {padded} padded rows: {error}") from error
+        raise RuntimeError(
+            f"{SCHEDULE_TRAPPED} at capacity {capacity} of {padded} padded rows: {error}"
+        ) from error
     rows = int(total.item())
     scheduler.release_counts()
     return {"rows": rows, "padded": padded, "capacity": capacity}

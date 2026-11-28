@@ -352,7 +352,11 @@ ADDED_GROUP_LAYOUTS = {
 }
 
 
-@pytest.mark.parametrize("ep,local_experts,topk", list(ADDED_GROUP_LAYOUTS.values()), ids=list(ADDED_GROUP_LAYOUTS))
+@pytest.mark.parametrize(
+    "ep,local_experts,topk",
+    list(ADDED_GROUP_LAYOUTS.values()),
+    ids=list(ADDED_GROUP_LAYOUTS),
+)
 def test_group_layout_overflow_traps(record_property, ep, local_experts, topk):
     """The scheduler of a group's later layout as rank 0 on one GPU (the gathered ids given), at the full skew to rank
     0 with a schedule capacity one 256-row tile below rank 0's padded rows, in a process session of its own: the rows
@@ -367,8 +371,18 @@ def test_group_layout_overflow_traps(record_property, ep, local_experts, topk):
         arch = gaps.TARGETS.get(capability, f"sm_{capability[0]}{capability[1]}")
         if arch not in registry[f"rows_{ep}_{local_experts}"]["arches"]:
             pytest.skip(f"rows_{ep}_{local_experts} has no {arch} build")
-    run = run_ranks_isolated(1, workers.group_layout_overflow, ep, local_experts, topk, 1, timeout=OVERFLOW_TIMEOUT)
-    record_property("overflow_run", {"returncode": run["returncode"], "timed_out": run["timed_out"]})
+    run = run_ranks_isolated(
+        1,
+        workers.group_layout_overflow,
+        ep,
+        local_experts,
+        topk,
+        1,
+        timeout=OVERFLOW_TIMEOUT,
+    )
+    record_property(
+        "overflow_run", {"returncode": run["returncode"], "timed_out": run["timed_out"]}
+    )
     assert not run["timed_out"], run["log"][-4000:]
     assert run["returncode"] != 0, run["log"][-4000:]
     kind, text = run["records"][0] or (None, run["log"][-4000:])

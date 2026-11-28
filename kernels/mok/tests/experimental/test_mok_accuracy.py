@@ -1110,7 +1110,14 @@ def test_epilogue_forward_scaled_accuracy(record_property, tokens, hidden):
 
 
 def _scaled_group_adapter_case(
-    *, tokens=512, hidden=512, intermediate=256, macro=1536, mini=256, seed=8431, layout=None
+    *,
+    tokens=512,
+    hidden=512,
+    intermediate=256,
+    macro=1536,
+    mini=256,
+    seed=8431,
+    layout=None,
 ):
     """The group's adapter step (``build_schedule``, ``forward``, ``backward``; ``router_weight_gradient="direct"``,
     ``shared_expert="scaled"``, plain SwiGLU, FP32 accumulators, several macrobatches) at EP8 ``(8, 64)`` (or at the
@@ -1368,7 +1375,15 @@ def test_epilogue_forward_none_accuracy(record_property, tokens, hidden):
 
 
 def _situ_group_adapter_case(
-    kind, *, tokens=256, hidden=512, intermediate=256, macro=8192, mini=256, seed=8531, layout=None
+    kind,
+    *,
+    tokens=256,
+    hidden=512,
+    intermediate=256,
+    macro=8192,
+    mini=256,
+    seed=8531,
+    layout=None,
 ):
     """The 896-expert top-16 group's adapter step (``build_schedule``, ``forward``, ``backward``;
     ``activation="situ_glu"`` with ``situ_beta`` 4 and ``situ_lb`` 25, ``shared_expert="none"``,
@@ -1381,7 +1396,10 @@ def _situ_group_adapter_case(
     ``shared_w=None``, ``activation=("situ_glu", 4, 25)`` and ``direct=True``): ``y``, ``dx``, the router-weight
     gradients (also alone at the zero weights, ``d_scores_zero_weight``) and the three routed weight gradients (each the
     sum of EP equal copies of every route in the emulation, judged divided by EP, a power of two)."""
-    (ep, experts), topk = SITU_GROUP.layouts[0] if layout is None else layout, SITU_GROUP.topk
+    (ep, experts), topk = (
+        SITU_GROUP.layouts[0] if layout is None else layout,
+        SITU_GROUP.topk,
+    )
     device = torch.device("cuda", torch.cuda.current_device())
     functional = backend.MoKFunctional(
         ep, experts, topk, fp32_wgrad=True, router_weight_gradient="direct", shared_expert="none",
@@ -1473,7 +1491,11 @@ SITU_LAYOUT_CASES = [
 ]
 
 
-@pytest.mark.parametrize("layout", SCALED_LAYOUTS_ADDED, ids=[f"ep{ep}-local{e}" for ep, e in SCALED_LAYOUTS_ADDED])
+@pytest.mark.parametrize(
+    "layout",
+    SCALED_LAYOUTS_ADDED,
+    ids=[f"ep{ep}-local{e}" for ep, e in SCALED_LAYOUTS_ADDED],
+)
 def test_scaled_group_layout_adapter_accuracy(record_property, layout):
     """:func:`test_scaled_group_adapter_accuracy` at a later layout of the 512-expert top-10 group, emulated on one GPU
     as rank 0 of its EP group with every route on this rank."""
@@ -1481,7 +1503,10 @@ def test_scaled_group_layout_adapter_accuracy(record_property, layout):
     _check(
         record_property,
         gaps.OUTPUTS,
-        gaps.judged(("scaled_group_adapter", layout), lambda: _scaled_group_adapter_case(layout=layout)),
+        gaps.judged(
+            ("scaled_group_adapter", layout),
+            lambda: _scaled_group_adapter_case(layout=layout),
+        ),
     )
 
 
@@ -1494,5 +1519,8 @@ def test_situ_group_layout_adapter_accuracy(record_property, layout, kind):
     _check(
         record_property,
         gaps.OUTPUTS,
-        gaps.judged(("situ_group_adapter", layout, kind), lambda: _situ_group_adapter_case(kind, layout=layout)),
+        gaps.judged(
+            ("situ_group_adapter", layout, kind),
+            lambda: _situ_group_adapter_case(kind, layout=layout),
+        ),
     )
