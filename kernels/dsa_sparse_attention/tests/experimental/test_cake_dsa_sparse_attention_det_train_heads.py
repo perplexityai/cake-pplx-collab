@@ -27,12 +27,13 @@ through its generated launcher into a recorder): the records of the five builds;
 and without the builds registered; above 64 heads the stage order, the grids (``fwd_h128``'s persistent grid, one CTA
 per item for the main and pass builds, the redo's persistent grid over ``2 T`` items) and the launch values (head
 count, window selector, item order, ``[T, H]`` operands) on every architecture; the pack / pack27 choice from
-``T * topk``; the key-pass token chunk and the sm_107a key-pass rule; the workspace (``2 T`` dQ partial blocks of 36,864
-FP32, ``delta [T, H]``); validation; the architecture rule, the refusals without the builds (also a registry without
-the sm_107a builds) and calls without query rows.  Device tests (sm_100a / sm_103a / sm_107a): every floating output
-against the FP64 oracle at the naive BF16 tier (``tests/cake_naive.py``), and bit-for-bit repeats -- eager, autograd,
-the prepared runner and its CUDA-graph replay, dK / dV over 1, 2 and 3 key passes, the forward over other grids, and a
-forced redo of most rows over its persistent and a per-item grid; on sm_107a the plan on the device's SM count.
+``T * topk``; the key-pass rule above 64 heads (one pass unless ``key_passes`` selects more); the workspace (``2 T``
+dQ partial blocks of 36,864 FP32, ``delta [T, H]``); validation; the architecture rule, the refusals without the
+builds (also a registry without the sm_107a builds) and calls without query rows.  Device tests (sm_100a / sm_103a /
+sm_107a): every floating output against the FP64 oracle at the naive BF16 tier (``tests/cake_naive.py``), and
+bit-for-bit repeats -- eager, autograd, the prepared runner and its CUDA-graph replay, dK / dV over 1, 2 and 3 key
+passes, the forward over other grids, and a forced redo of most rows over its persistent and a per-item grid; on
+sm_107a the plan on the device's SM count.
 "Bitwise" is bit-pattern equality (integer views).
 """
 
@@ -468,53 +469,107 @@ def test_redo_grid_walks_the_items():
     assert cake_backend.single_pass_grid(5000, 160) == (160, 1, 1)
 
 
-def test_key_pass_token_chunk_counts_two_blocks_per_token(monkeypatch):
-    """Above 64 heads the key-pass policy's token chunk counts two dQ partial blocks per token (2176 tokens at
-    top-k 2048 against 4224 at 64 heads): a row of 2177 tokens and 131,072 keys on sm_100a takes the policy's three
-    passes at 64 heads and one pass above."""
-    _Host(monkeypatch, "sm_100a")
-    record = cake_jit.record()
-    policy = cake_backend.KeyPassPolicy.from_record(record)
-    assert policy.token_chunk(TOPK) == 4224
-    assert policy.token_chunk(TOPK, cake_backend.HEAD_WINDOW_ITEMS) == 2176
-    stages = cake_jit.registered_stages()
-    S = 131072
-
-    def passes(T, items):
-        return cake_backend.plan_key_passes(
-            record, stages, T, S, TOPK, arch="sm_100a", items_per_token=items
-        )
-
-    assert passes(2177, 1) == 3
-    assert passes(2177, 2) == 1
-    assert passes(2176, 2) == passes(2176, 1) == 3
-    for heads, T, want in ((64, 2177, 3), (96, 2177, 1), (128, 2176, 3)):
-        assert cake_backend.dsa_train_workspace_size(
-            T, S, TOPK, num_heads=heads
-        ) == cake_backend.dsa_train_workspace_size(
-            T, S, TOPK, num_heads=heads, key_passes=want
-        ), (heads, T)
+#: One-segment rows (top-k 2048) where the record's rule plans more than one key pass at 64 heads: ``(T, S)`` -> the
+#: passes per architecture (every row within the 64-head token chunk of 4,224 tokens; the formula ``ceil(S * 2304 /
+#: 100 MiB)`` up to four passes on sm_100a / sm_103a, two fixed passes from 131,072 keys on sm_107a).  Above 64 heads
+#: each plans one pass.
+KEY_PASS_ROWS = {
+    (2048, 65536): {"sm_100a": 2, "sm_103a": 2, "sm_107a": 1},
+    (2048, 131072): {"sm_100a": 3, "sm_103a": 3, "sm_107a": 2},
+    (1024, 163840): {"sm_100a": 4, "sm_103a": 4, "sm_107a": 2},
+    (2176, 1048320): {"sm_100a": 1, "sm_103a": 1, "sm_107a": 2},
+    (4096, 131072): {"sm_100a": 3, "sm_103a": 3, "sm_107a": 2},
+}
 
 
-def test_sm107a_key_pass_rule_above_64_heads(monkeypatch):
-    """On sm_107a the record's rule (two passes for a one-chunk row of at least 131,072 keys) holds above 64 heads
-    within the head-window token chunk (2176 tokens at top-k 2048): 2176 tokens over 131,072 keys take two passes at
-    64 heads and above, 2177 tokens two at 64 heads and one above (a row longer than the chunk), and 131,071 keys
-    one."""
-    _Host(monkeypatch, "sm_107a")
+@pytest.mark.parametrize("arch", HEAD_COUNT_ARCHES)
+def test_key_pass_rule_above_64_heads(monkeypatch, arch):
+    """Above 64 heads (two dQ partial blocks per token, ``items_per_token = HEAD_WINDOW_ITEMS``) the policy plans one
+    key pass on every row -- the rows of :data:`KEY_PASS_ROWS` included, where the record's rule plans two to four
+    passes at 64 heads --, ``key_passes`` 1, 2 or 3 plans that many passes, and a multi-segment row one pass.  At 64
+    heads the record's rule plans the passes of :data:`KEY_PASS_ROWS` (a row of 4,225 tokens, longer than the token
+    chunk, one pass).  ``dsa_train_workspace_size`` sizes those plans: above 64 heads the size of ``key_passes=1``
+    (below the size of two forced passes), at 64 heads the size of the record's passes."""
+    _Host(monkeypatch, arch)
     record = cake_jit.record()
     stages = cake_jit.registered_stages()
     items = cake_backend.HEAD_WINDOW_ITEMS
+    assert cake_backend.KeyPassPolicy.from_record(record).token_chunk(TOPK) == 4224
 
-    def passes(T, S, n):
+    def passes(T, S, n, forced=None, segments=1):
         return cake_backend.plan_key_passes(
-            record, stages, T, S, TOPK, arch="sm_107a", items_per_token=n
+            record,
+            stages,
+            T,
+            S,
+            TOPK,
+            forced,
+            num_segments=segments,
+            arch=arch,
+            items_per_token=n,
         )
 
-    assert passes(2176, 131072, 1) == passes(2176, 131072, items) == 2
-    assert passes(2177, 131072, 1) == 2
-    assert passes(2177, 131072, items) == 1
-    assert passes(2176, 131071, 1) == passes(2176, 131071, items) == 1
+    for (T, S), want in KEY_PASS_ROWS.items():
+        assert passes(T, S, 1) == want[arch], (T, S)
+        assert passes(T, S, 1, segments=2) == 1
+    assert passes(4225, 131072, 1) == 1
+    for T, S in tuple(KEY_PASS_ROWS) + ((2177, 131072), (16380, 1048320)):
+        for segments in (1, 2):
+            assert passes(T, S, items, segments=segments) == 1, (T, S, segments)
+            for forced in (1, 2, 3):
+                assert passes(T, S, items, forced, segments) == forced
+    for (T, S), want in KEY_PASS_ROWS.items():
+        for heads in (64, 96, 128):
+            size = cake_backend.dsa_train_workspace_size(T, S, TOPK, num_heads=heads)
+            planned = want[arch] if heads == 64 else 1
+            assert size == cake_backend.dsa_train_workspace_size(
+                T, S, TOPK, num_heads=heads, key_passes=planned
+            ), (T, S, heads)
+            if heads != 64:
+                assert size < cake_backend.dsa_train_workspace_size(
+                    T, S, TOPK, num_heads=heads, key_passes=2
+                ), (T, S, heads)
+
+
+@pytest.mark.parametrize("arch", HEAD_COUNT_ARCHES)
+def test_prepared_plan_takes_one_pass_above_64_heads(monkeypatch, arch):
+    """A prepared runner plans its key passes as :func:`test_key_pass_rule_above_64_heads` states, through the
+    planner a call uses: with the record's policy cut to an L2 budget of 32 key rows and the R1 rule (three passes for
+    96 keys), a 40-token runner over 96 keys takes three passes at 64 heads (``bwd_compact`` and ``bwd_main_pass``
+    per pass, the dQ partial) and one pass at 96 and 128 heads (``bwd_main_hw``, no dQ partial); ``key_passes`` 2 / 3
+    above 64 heads runs that many passes of ``bwd_main_pass_hw``."""
+    real_record = cake_jit.record
+
+    def record(program=cake_jit.PROGRAM):
+        rec = real_record(program)
+        if program != cake_jit.PROGRAM:
+            return rec
+        policy = {k: v for k, v in rec["key_pass_policy"].items() if k != "rules"}
+        policy["l2_budget_bytes"] = 32 * int(policy["key_bytes"])
+        return dict(rec, key_pass_policy=policy)
+
+    monkeypatch.setattr(cake_jit, "record", record)
+    _Host(monkeypatch, arch)
+    unswap = {v: k for k, v in HEAD_COUNT_STAGES.items() if k != "fwd"}
+    for heads, forced, want in (
+        (64, None, 3),
+        (96, None, 1),
+        (128, None, 1),
+        (96, 2, 2),
+        (128, 3, 3),
+    ):
+        runner = _runner_case(_host_inputs(40, 96, 16, heads), key_passes=forced)
+        assert runner.key_passes == want, (heads, forced, runner.key_passes)
+        order = _expected_order(want, False)
+        if heads == NUM_HEADS:
+            order = tuple(
+                (unswap.get(k[0], k[0]), k[1])
+                if isinstance(k, tuple)
+                else unswap.get(k, k)
+                for k in order
+            )
+        assert runner.backward_order == order, (heads, forced)
+        assert ("dq_partial" in runner.layout) == (want > 1), (heads, forced)
 
 
 @pytest.mark.parametrize("passes", (1, 2))

@@ -345,10 +345,11 @@ def head_window_token_order(token_base: int, token_step: int) -> None:
 def head_window_key_passes_rule(
     num_heads: int, arch: Optional[str], dkv_direct: bool = False
 ) -> bool:
-    """Whether a backward over ``num_heads`` query heads on ``arch`` plans its key passes with the head-window
-    overrides (``HEAD_WINDOW_KEY_PASS_RULES``): above 64 heads where the program ships the single-pass head-window
-    main build of the binding's accumulation (``bwd_main_hw``, or ``bwd_main_natural_hw`` with ``dkv_direct``), the
-    build a one-pass plan runs; ``False`` at 64 heads and on the two-window bridge."""
+    """Whether a backward over ``num_heads`` query heads on ``arch`` plans its key passes with the head-window rule
+    (one pass unless ``key_passes`` selects more; see the comment above :class:`KeyPassPolicy`): above 64 heads where
+    the program ships the single-pass head-window main build of the binding's accumulation (``bwd_main_hw``, or
+    ``bwd_main_natural_hw`` with ``dkv_direct``), the build a one-pass plan runs; ``False`` at 64 heads and on the
+    two-window bridge (the record's rule)."""
     if int(num_heads) == NUM_HEADS:
         return False
     stage = "bwd_main_natural" if dkv_direct else "bwd_main"
@@ -421,12 +422,10 @@ TMA_ADDRESS_ALIGN = 16  # bytes: the descriptor's global address
 # ``SUPPORTED_HEADS``) carries one dQ partial row per (token, window) work
 # item, two per token: its chunk is the largest multiple of
 # ``token_chunk_multiple`` whose 2 x 147,456 + 4 * topk + 4 B per token fit the
-# same budget (2176 tokens at top-k 2048), its workspace grows by min(T, chunk)
-# * (2 x 147,456 + 4 * topk + 4) bytes, and its pass count is planned as at 64
-# heads (the one-chunk test reads the 64-head chunk) under the rule of the
-# architecture with the head-window overrides of
-# ``HEAD_WINDOW_KEY_PASS_RULES`` applied (see there: no tail-row passes on
-# ``sm_103a`` and ``sm_107a``).  The passes split the whole key row
+# same budget (2176 tokens at top-k 2048) and its workspace grows by min(T,
+# chunk) * (2 x 147,456 + 4 * topk + 4) bytes when it runs passes; it plans one
+# pass unless ``key_passes`` selects more (see the comment above
+# ``KeyPassPolicy``).  The passes split the whole key row
 # ``[0, S)`` into equal ranges,
 # which matches an index row whose keys spread over the whole row (one
 # document); in a packed multi-segment row every token's keys lie inside its
@@ -463,26 +462,24 @@ KEY_PASS_RULE_FIELDS = (
     "tail_cap",
 )
 _R1_RULE: dict[str, int] = dict.fromkeys(KEY_PASS_RULE_FIELDS, 0)
-# The key-pass rule fields a head-window backward above 64 heads (``head_window_plan``) plans with instead of the
-# record's rule of the architecture, per architecture (fields of ``KEY_PASS_RULE_FIELDS``; an architecture without an
-# entry plans with the record's rule).  ``sm_103a``: no tail-row passes.  The record's tail rule (three passes on the
-# ``2 T <= S`` rows of more than one token chunk and 131,072 or more keys) was measured on the 64-head program.  On
-# GB300 the head-window build's single pass is 15-20 % faster than those three passes on every tail row timed (top-k
-# 2048, 96 and 128 heads: T = 16,380 with S = 147,420 to 1,048,320, T = 8,448 and 4,352 with S = 131,072; backward
-# 39.5 / 40.5 ms against 45.6 / 46.8 ms at 96 heads and S = 524,160 / 1,048,320); two or three forced passes over any
-# token chunk stay 5-15 % slower than one at S = 524,160 / 1,048,320.  [est] The three passes keep each pass's FP32 dKV
-# accumulator slice (S / 3 x 2,304 B) nearer the L2 budget; with head windows the extra launches, the FP32 dQ-partial
-# round trip and the compaction of every pass cost more than that locality gains, also where the slice is close to the
-# 100 MiB budget (113 MB at S = 147,420).  ``sm_107a``: no tail-row passes either.  Its record rule plans two fixed
-# passes on the tail rows from 131,072 keys; on VR200 the head-window build's single pass beats the two passes of the
-# key-range-pass build by 10-12 % on the main-stage kernels at T = 16,380, S = 524,160 / 1,048,320 (96 and 128 heads,
-# top-k 2048; every round of eight).  The single-pass plan runs ``bwd_main_natural_hw`` where the two-pass plan ran
-# ``bwd_main_pass_natural_hw``, so ``dq`` takes the one-pass FP32 summation order (the naive BF16 tier judges it).
-# One-chunk rows keep the record's rule; the 64-head plans and the two-window bridge are unchanged.
-HEAD_WINDOW_KEY_PASS_RULES: dict[str, dict[str, int]] = {
-    "sm_103a": {"tail_rows": 0},
-    "sm_107a": {"tail_rows": 0},
-}
+# A head-window backward above 64 heads (``head_windows``: :func:`head_window_key_passes_rule`) plans one key pass on
+# every row and architecture; only ``key_passes`` selects the key-range-pass builds there (``bwd_main_pass_hw``,
+# ``bwd_main_pass_natural_hw``).  The record's rules were measured on the 64-head program.  Applied to head windows
+# they plan two to four passes on the one-chunk rows (one segment, top-k 2048, T up to 4,224: two / three / four passes
+# from 65,536 / 131,072 / 163,840 keys on sm_100a and sm_103a, two from 131,072 keys on sm_107a; the rows above 2,176
+# tokens ran their passes in two token chunks) and three (sm_103a) or two (sm_107a) passes on the tail rows (which
+# earlier releases already ran in one pass).  One pass was
+# faster than those plans on every multi-pass row timed (96 and 128 heads, both packages; backward, training step and
+# checkpointed recompute; medians of same-round ratios): one-chunk rows on B200 (T = 2,048, S = 131,072; three passes)
+# 6-17 %, on GB300 (T = 2,048 with S = 65,536 / 131,072 and T = 1,024 with S = 163,840; two / three / four passes)
+# 5-22 % and on VR200 (T = 1,024 to 2,176 with S = 131,072 to 1,048,320; two passes) 5-11 %; tail rows on GB300
+# (T = 16,380 with S = 147,420 to 1,048,320, T = 8,448 and 4,352 with S = 131,072; three passes) 15-20 % on the
+# backward and on VR200 (T = 16,380, S = 524,160 / 1,048,320; two passes) 10-12 % on the main-stage kernels.  The
+# forward is unchanged.  [est] With head windows every pass repeats the compaction, the FP32 dQ-partial round trip of
+# both windows and the pipeline fill, which costs more than the L2 locality of a pass's dK/dV accumulator slice gains.
+# One pass also needs no pass scratch.  The single-pass plan runs ``bwd_main_hw`` / ``bwd_main_natural_hw``, so ``dq``
+# takes the one-pass FP32 summation order (the naive BF16 tier judges it).  The 64-head plans, the two-window bridge,
+# the NoPE program and multi-segment rows keep the record's rule.
 
 
 @dataclass(frozen=True)
@@ -578,9 +575,9 @@ class KeyPassPolicy:
         head_windows: bool = False,
     ) -> int:
         """Passes of a binding under the rule of ``arch`` (see the comment above
-        ``KEY_PASS_STAGES``; with ``head_windows``, a head-window backward above
-        64 heads, the rule with the ``HEAD_WINDOW_KEY_PASS_RULES`` fields of
-        ``arch`` in place of its own): 1 for a multi-segment key row, a formula of 1, a
+        ``KEY_PASS_STAGES``): 1 for a head-window backward above 64 heads
+        (``head_windows``; see the comment above this class), a multi-segment
+        key row, a formula of 1, a
         row that is neither one chunk nor (with ``tail_rows``) ``2 T <= S``, or
         fewer keys than the row's floor (``min_kv`` for a one-chunk row,
         ``tail_min_kv`` for a tail row of more than one chunk); else
@@ -590,15 +587,13 @@ class KeyPassPolicy:
         benefit) is one pass."""
         if int(num_segments) < 1:
             raise ValueError(f"num_segments must be >= 1, got {num_segments}")
-        if int(num_segments) > 1:
+        if head_windows or int(num_segments) > 1:
             return 1
         T, S = int(num_queries), int(num_kv)
         formula = self.formula_passes(S)
         if formula == 1:
             return 1
         rule = self.rule_for(arch)
-        if head_windows:
-            rule.update(HEAD_WINDOW_KEY_PASS_RULES.get(arch, {}))
         one_chunk = self.token_chunk(topk) >= T
         tail = bool(rule["tail_rows"]) and 2 * T <= S
         if not (one_chunk or tail):
@@ -640,8 +635,8 @@ def plan_key_passes(
     the R1 rule).  ``program`` names the pass stages (``KEY_PASS_STAGES`` of the
     RoPE program, their ``nope_`` forms of the NoPE program).  ``head_windows``:
     the backward runs the head-window builds above 64 heads
-    (:func:`head_window_key_passes_rule`), whose policy takes the head-window
-    overrides of ``arch`` (``HEAD_WINDOW_KEY_PASS_RULES``).
+    (:func:`head_window_key_passes_rule`), whose policy plans one pass (see the
+    comment above :class:`KeyPassPolicy`).
     """
     pass_stages = _program_stages(KEY_PASS_STAGES, program)
     multi_pass = all(stage in stages for stage in pass_stages)

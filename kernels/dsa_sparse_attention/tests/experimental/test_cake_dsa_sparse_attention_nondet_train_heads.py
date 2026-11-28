@@ -1014,64 +1014,69 @@ def test_head_window_item_order(monkeypatch, arch):
                 assert compact["num_tokens"] == min(16, T - base)
 
 
+#: One-segment rows (top-k 2048) where the record's 64-head rule plans more than one key pass: ``(T, S)`` -> the
+#: record's passes at 64 heads per architecture (every row is one 64-head token chunk, 4,224 tokens; the formula
+#: ``ceil(S * 2304 / 100 MiB)`` up to four passes on sm_100a / sm_103a, two fixed passes from 131,072 keys on sm_107a).
+#: A head-window backward above 64 heads plans one pass on each of them.
+HW_KEY_PASS_ROWS = {
+    (2048, 65536): {"sm_100a": 2, "sm_103a": 2, "sm_107a": 1},
+    (2048, 131072): {"sm_100a": 3, "sm_103a": 3, "sm_107a": 2},
+    (1024, 163840): {"sm_100a": 4, "sm_103a": 4, "sm_107a": 2},
+    (2176, 1048320): {"sm_100a": 1, "sm_103a": 1, "sm_107a": 2},
+    (4096, 131072): {"sm_100a": 3, "sm_103a": 3, "sm_107a": 2},
+}
+
+
+def _h64_key_passes(T, S, arch):
+    """The record's passes at 64 heads of a row of :func:`test_head_window_key_pass_rule` (one segment)."""
+    if (T, S) in HW_KEY_PASS_ROWS:
+        return HW_KEY_PASS_ROWS[(T, S)][arch]
+    if T == 16380 and S >= 524160:  # tail rows: three passes (sm_103a) / two (sm_107a)
+        return {"sm_103a": 3, "sm_107a": 2}.get(arch, 1)
+    return None
+
+
 @pytest.mark.parametrize("arch", ("sm_100a", "sm_103a", "sm_107a"))
 def test_head_window_key_pass_rule(monkeypatch, arch):
-    """The key passes of a head-window backward: the record's rule of the architecture with the overrides of
-    ``HEAD_WINDOW_KEY_PASS_RULES`` -- on sm_103a and sm_107a no tail rows, so the issue's context-parallel rows
-    (T = 16,380, S = 524,160 / 1,048,320, top-k 2048) plan one pass where the 64-head rule plans three (sm_103a) or
-    two (sm_107a) --, every other row and architecture as at 64 heads, a forced count and a multi-segment row
-    unchanged.  The override holds above 64 heads where the single-pass head-window build of the binding's
-    accumulation ships (:func:`head_window_key_passes_rule`; never at 64 heads or on the two-window bridge), and both
-    planners pass it: ``_plan`` and ``dsa_train_workspace_size`` (its size is the one-pass head-window layout above 64
-    heads, the three-pass (sm_103a) or two-pass (sm_107a) 64-head layout at 64 heads).  On sm_107a with the
-    head-window builds hidden, the bridge keeps the record's rule (:func:`_bridge_key_pass_rule_sm107a`)."""
-    assert cake_backend.HEAD_WINDOW_KEY_PASS_RULES == {
-        "sm_103a": {"tail_rows": 0},
-        "sm_107a": {"tail_rows": 0},
-    }
+    """The key passes of a head-window backward above 64 heads: one pass on every row and architecture -- the
+    one-chunk rows of :data:`HW_KEY_PASS_ROWS` (two to four passes at 64 heads) and the tail rows (T = 16,380, S =
+    524,160 / 1,048,320: three passes on sm_103a, two on sm_107a at 64 heads) included --, a forced count as forced
+    (``key_passes`` 1, 2 or 3 still reaches the key-range-pass builds) and a multi-segment row one pass; at 64 heads
+    the record's rule plans the passes of :data:`HW_KEY_PASS_ROWS`.  The rule holds above 64 heads where the
+    single-pass head-window build of the binding's accumulation ships (:func:`head_window_key_passes_rule`; never at
+    64 heads or on the two-window bridge), and both planners pass it: ``_plan`` and ``dsa_train_workspace_size``
+    (above 64 heads the one-pass head-window layout, the size of ``key_passes=1`` and below the size of two forced
+    passes; at 64 heads the layout of the record's passes).  On sm_107a with the head-window builds hidden, the
+    bridge keeps the record's rule (:func:`_bridge_key_pass_rule_sm107a`)."""
     record = cake_jit.record()
     stages = tuple(cake_jit.registered_stages())
     assert set(KEY_PASS_STAGES) <= set(stages)
-    rows = (
-        (16380, 16380, 1),
-        (16380, 524160, 1),
-        (16380, 1048320, 1),
-        (16380, 16380, 4),
-        (16380, 524160, 4),
-        (4096, 65536, 1),
-        (4096, 131072, 1),
-        (4096, 1048320, 1),
-        (8448, 131072, 1),
-        (32768, 131072, 1),
-        (65536, 1048320, 1),
+    rows = tuple(HW_KEY_PASS_ROWS) + (
+        (16380, 16380),
+        (16380, 524160),
+        (16380, 1048320),
+        (4096, 65536),
+        (4096, 1048320),
+        (8448, 131072),
+        (32768, 131072),
+        (65536, 1048320),
     )
-    for T, S, seg in rows:
+    for (T, S), seg in itertools.product(rows, (1, 4)):
         kw = {"num_segments": seg, "arch": arch}
         base = cake_backend.plan_key_passes(record, stages, T, S, TOPK, **kw)
+        want = _h64_key_passes(T, S, arch)
+        if seg == 1 and want is not None:
+            assert base == want, (arch, T, S, base, want)
         hw = cake_backend.plan_key_passes(
             record, stages, T, S, TOPK, head_windows=True, **kw
         )
-        tail_only = (
-            arch in ("sm_103a", "sm_107a") and seg == 1 and T > 4224 and 2 * T <= S
-        )
-        assert hw == (1 if tail_only else base), (arch, T, S, seg, base, hw)
+        assert hw == 1, (arch, T, S, seg, base, hw)
         for forced in (1, 2, 3):
             assert (
                 cake_backend.plan_key_passes(
                     record, stages, T, S, TOPK, forced, head_windows=True, **kw
                 )
                 == forced
-            )
-    if arch in ("sm_103a", "sm_107a"):
-        for S in (524160, 1048320):
-            assert cake_backend.plan_key_passes(
-                record, stages, 16380, S, TOPK, arch=arch
-            ) == (3 if arch == "sm_103a" else 2)
-            assert (
-                cake_backend.plan_key_passes(
-                    record, stages, 16380, S, TOPK, arch=arch, head_windows=True
-                )
-                == 1
             )
     h = hl.HostLaunches(  # the registry's single-pass forward: sm_107a has no head-window forward
         monkeypatch,
@@ -1105,16 +1110,17 @@ def test_head_window_key_pass_rule(monkeypatch, arch):
         seen.clear()
         hl.run_case(h, cake_backend, {"entry": "backward"}, inp)
         assert seen and set(seen) == {heads != 64}, (heads, seen)
-    T, S = 16380, 524160
-    for heads in (64, 96, 128):
+    policy = cake_backend.KeyPassPolicy.from_record(record)
+    for (T, S), heads in itertools.product(
+        tuple(HW_KEY_PASS_ROWS) + ((16380, 524160),), (64, 96, 128)
+    ):
         seen.clear()
         size = cake_backend.dsa_train_workspace_size(
             T, S, TOPK, num_heads=heads, dkv_acc=True, dout_copy=False
         )
         assert seen == [heads != 64]
-        passes = {"sm_103a": 3, "sm_107a": 2}.get(arch, 1) if heads == 64 else 1
+        passes = _h64_key_passes(T, S, arch) if heads == 64 else 1
         items = 1 if heads == 64 else cake_backend.HEAD_WINDOW_ITEMS
-        policy = cake_backend.KeyPassPolicy.from_record(record)
         direct = cake_backend.plan_dkv_direct(
             record, stages, T, S, TOPK, accumulate=True, arch=arch
         )
@@ -1131,7 +1137,22 @@ def test_head_window_key_pass_rule(monkeypatch, arch):
             fused_forward=heads != 64,
             fused_backward=heads != 64,
         )
-        assert size == layout["total"], (arch, heads, size, layout["total"])
+        assert size == layout["total"], (arch, T, S, heads, size, layout["total"])
+        assert ("dq_partial" in layout) == (passes > 1), (arch, T, S, heads, passes)
+        if heads != 64:
+            sized = {
+                p: cake_backend.dsa_train_workspace_size(
+                    T,
+                    S,
+                    TOPK,
+                    num_heads=heads,
+                    dkv_acc=True,
+                    dout_copy=False,
+                    key_passes=p,
+                )
+                for p in (1, 2)
+            }
+            assert size == sized[1] < sized[2], (arch, T, S, heads, size, sized)
     # sm_107a with the head-window builds hidden: the bridge keeps the record's rule
     if arch == "sm_107a":
         with monkeypatch.context() as m:
@@ -1149,7 +1170,7 @@ def test_head_window_key_pass_rule(monkeypatch, arch):
 
 def _bridge_key_pass_rule_sm107a(monkeypatch, h, record, stages):
     """sm_107a above 64 heads on the two-window bridge (the head-window builds hidden): both planners pass the record's
-    64-head key-pass rule (no head-window override), and the workspace size of the issue's context-parallel rows
+    64-head key-pass rule (not the head-window rule), and the workspace size of the issue's context-parallel rows
     (T = 16,380, S = 524,160 / 1,048,320, top-k 2048) is the bridge's layout with the record's passes (two, from
     131,072 keys) over 64-head token chunks and the record's direct rule."""
     seen = []
