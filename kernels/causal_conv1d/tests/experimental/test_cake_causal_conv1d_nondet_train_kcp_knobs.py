@@ -359,8 +359,10 @@ def test_graph_key_and_record_of_the_forward_form() -> None:
 
 @pytest.mark.cpu_only
 def test_overlapped_route_rule() -> None:
-    """The overlapped pair runs every backward call with tokens and at most ``DYN_MAX_CHANNELS`` channels and no SM
-    reserve; a reserve, a wider ``C`` or no tokens run the single program."""
+    """The overlapped route runs every backward call with tokens and at most ``DYN_MAX_CHANNELS`` channels and no SM
+    reserve (its main program is ``kcp_bwd_dyn``, or the one-program backward on a key of the L1o route table:
+    ``test_cake_causal_conv1d_nondet_train_kcp_build.py::test_dyn_host_route_state``); a reserve, a wider ``C`` or no
+    tokens run the single program after the wait."""
     limit = conv_kcp._loader.DYN_MAX_CHANNELS
     assert limit == 65536
     assert conv_kcp._overlapped(8, 1, 0) and conv_kcp._overlapped(limit, 1 << 20, 0)

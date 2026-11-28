@@ -45,7 +45,8 @@ exchange (:func:`_bwd_overlap`):
    Launch Control, the lanes of CTAs that have not started, so a kernel resident
    on another stream leaves no work waiting for the SMs it holds; their FP32
    ``dweight`` runs are added into four FP32 accumulator copies in the order the
-   runs end, summed once per channel tile;
+   runs end, summed once per channel tile (on the keys of the L1o route table the
+   main program is the one-program backward instead, below);
 3. after the wait, when the rank receives tail rows, the tail-row program
    (kind ``kcp_bwd_halo``) writes ``dx`` of the last three rows of each
    fragment that has them, from the received rows.
@@ -56,11 +57,17 @@ writes the tail rows again after it.  With more than one rank the head
 program(s), the multi call's concatenation of the send rows, the exchange
 issue, the wait and the tail-row program(s) run on the device's high-priority
 side stream (:func:`_side_stream`), forked from the caller's stream, and the
-main program(s) launch on the caller's stream at once (they read no head row)
-with the context's ``tail_row_off`` as their ``skip_row_off``: they leave the
-last rows of every fragment with a tail row to the tail-row programs, so the
-two write disjoint rows and the tail-row programs run as soon as the exchange
-arrives, beside the main programs, instead of after them.  The caller's stream
+main program(s) launch on the caller's stream at once (they read no head row).
+Off the L1o keys they run with the context's ``tail_row_off`` as their
+``skip_row_off``: they leave the last rows of every fragment with a tail row to
+the tail-row programs, so the two write disjoint rows and the tail-row programs
+run as soon as the exchange arrives, beside the main programs, instead of after
+them.  On a key the main program (the one-program backward) writes every row and
+the side stream waits for the caller's stream before the tail-row programs,
+which then write the tail rows again after it.  In a multi call that mixes key
+and non-key tensors the side stream waits once for all of them, so the non-key
+tensors' tail-row programs also run after every main program on the caller's
+stream (the same rows and results, less overlap).  The caller's stream
 joins the side stream after the main programs (also when a launch raises).
 The buffers the side stream fills are allocated on the caller's stream before
 the fork, so the join orders their reuse (no ``record_stream``).  After the
@@ -79,8 +86,16 @@ backward (kind ``kcp_bwd``) after the wait instead: one ordinary launch whose
 CTAs add their FP32 ``dweight`` CTA rows into the zeroed FP32 accumulators
 ``acc`` (``[C, 4]``) with unordered global reductions; the last CTA of each
 channel tile (a ticket on its ``work`` counter) stores the rank-local FP32
-``dweight`` partial and zeroes the tile's accumulators and counter.  Both
-programs' workspaces are the package's cached backward workspace of the device
+``dweight`` partial and zeroes the tile's accumulators and counter.  On the
+keys of the L1o route table (:func:`kcp_jit.l1o_route`: measured devices, world
+sizes, channels and tokens on the rank; never ``dweight_sum="fp32_pair"``) the
+overlapped backward launches that one-program backward in place of
+``kcp_bwd_dyn``, before the wait, with every ``tail_row_off`` entry ``-1`` and
+:data:`kcp_jit.L1O_RESERVE_SMS` SMs left free; its tail-row program then waits
+for it as well as for the exchange.  Its grid is one wave with a static share
+of tokens per CTA, so beside a kernel on another stream that holds more than
+those SMs the CTAs that do not fit wait for a free SM (a second wave; no grid
+barrier, so no deadlock).  Both programs' workspaces are the package's cached backward workspace of the device
 and current stream (zero before and after every launch; inside a CUDA Graph
 capture with a nonzero capture id one zeroed buffer per capture and stream,
 shared by the capture's backward calls on that stream: a buffer an earlier
@@ -162,14 +177,19 @@ caller's stream.  ``_set_test_knobs({"host_trim": 0})`` (a private test hook;
 the backend reads no environment variable) selects the previous host path for
 the A/B record.
 
-Backward grid beside a concurrent kernel: the main
-backward launches :func:`_bwd_grid`, ``ctas_per_sm x SM count`` CTAs less
+Backward grid beside a concurrent kernel: the one-program main
+backward (``kcp_bwd``) launches :func:`_bwd_grid`, ``ctas_per_sm x SM count`` CTAs less
 ``ctas_per_sm`` when the last channel-tile rank of that grid holds at least
 ``ctas_per_sm`` CTAs.  A kernel on another stream that keeps one SM's shared
 memory leaves room for ``ctas_per_sm`` fewer CTAs; with the full grid the top
 CTAs, each carrying a whole token stream, then run in a second wave.  The
 program derives its token streams and ticket count from ``gridDim``, so ``dx``
-keeps its bits and ``dweight`` sums the same terms in other partial sums.
+keeps its bits and ``dweight`` sums the same terms in other partial sums.  By
+default this grid serves the calls the overlapped backward does not run (more
+than ``DYN_MAX_CHANNELS`` channels, no tokens).  On a key of the L1o route
+table the default call launches ``kcp_bwd`` before the wait with the reserve
+``kcp_jit.L1O_RESERVE_SMS[arch]`` (3 on sm_100a, 10 on sm_103a; 0 on sm_107a,
+where the grid is the full one).
 
 Opt-in SM reserve of the main backward (keyword ``bwd_reserve_sms``, default
 ``None`` = ``RESERVE_DEFAULT`` = 0, the grid above): ``bwd_reserve_sms=K >= 1``
@@ -177,7 +197,12 @@ launches the single-wave grid less ``K x ctas_per_sm`` CTAs, whatever the last
 channel-tile rank holds, so ``K`` SMs held by kernels of other streams leave the
 backward one wave.  It changes the launch grid only (same programs, ``dx``
 bitwise, ``dweight`` summed the same way); the host cache and graph keys hold
-``K``.  A multi-wave grid (``grid_mult`` > 1) launches unchanged.  On sm_107a
+``K``.  A multi-wave grid (``grid_mult`` > 1) launches unchanged.  On a B200 /
+GB300 key of the L1o route table the default call already leaves 3 / 10 SMs
+free before the exchange's wait; ``K >= 1`` there launches the grid with ``K``
+SMs free after the wait instead (a larger grid while ``K`` is below that
+reserve, the same grid at it), so it adds headroom only for ``K`` above the
+reserve and always gives up the overlap with the exchange.  On sm_107a
 ``K >= 1`` raises ``ValueError`` (:data:`RESERVE_UNSUPPORTED`): there the reserved
 grid costs up to 1.055x the shipped grid unloaded (C 1024, 62585 tokens).
 
@@ -253,6 +278,7 @@ from .kcp_jit import (
     dyn_plan,
     dyn_workspace_layout,
     head_grid,
+    l1o_route,
     load,
     route_modules,
     run_module,
@@ -985,9 +1011,10 @@ def _bwd_grid(
 def _overlapped(C: int, S: int, reserve: int) -> bool:
     """Whether a backward call runs the overlapped pair: ``kcp_bwd_dyn`` launched before the halo exchange's wait
     with every ``tail_row_off`` entry ``-1``, then ``kcp_bwd_halo`` (the rows the exchanged tail rows reach) after
-    it.  The shipped route of every call with tokens and at most ``DYN_MAX_CHANNELS`` channels; ``bwd_reserve_sms
-    >= 1`` keeps the ``kcp_bwd`` program's reserved grid, so it and a wider ``C`` run that program after the wait
-    (as does the ``bwd_route`` test knob ``"single"``)."""
+    it.  The shipped route of every call with tokens and at most ``DYN_MAX_CHANNELS`` channels (on a key of the L1o
+    route table, :func:`_dyn_host` gives the one-program backward's state in place of ``kcp_bwd_dyn``, launched at
+    the same point); ``bwd_reserve_sms >= 1`` keeps the ``kcp_bwd`` program's reserved grid, so it and a wider ``C``
+    run that program after the wait (as does the ``bwd_route`` test knob ``"single"``)."""
     return _TEST_KNOBS["bwd_route"] == "overlap" and not reserve and dyn_applies(C, S)
 
 
@@ -1032,7 +1059,21 @@ def _dyn_host(
     :func:`head_grid` (``None`` when the rank receives no tail row: the main program then writes every row as the
     single program does).  ``pair``: the main program is the ``kcp_bwd_dyn_pair`` route's (same plan and workspace).
     ``world_size``: the call's context-parallel world size (:func:`dyn_plan`'s context-parallel unit table, and with
-    ``arch`` its measured parts)."""
+    ``arch`` its measured parts).  A call on a key of the L1o route table (:func:`kcp_jit.l1o_route`; never a ``pair``
+    call) gets the one-program backward's state instead (:func:`_l1o_host`, ``"l1o": True``)."""
+    if not pair:
+        reserve = l1o_route(arch, _loader.sm_count(device_index), world_size, S, C)
+        if reserve is not None:
+            return _l1o_host(
+                arch,
+                S=S,
+                C=C,
+                n_frag=n_frag,
+                tail_rows=tail_rows,
+                device=device,
+                device_index=device_index,
+                reserve=reserve,
+            )
     (main,) = route_modules(arch, KCP_BWD_DYN_PAIR if pair else KCP_BWD_DYN)
     p = dyn_plan(S, C, _loader.sm_count(device_index), world_size=world_size, arch=arch)
     halo = None
@@ -1045,6 +1086,51 @@ def _dyn_host(
         "layout": dyn_workspace_layout(_loader.MODULES[main], C, p["n_tiles"], p["L"]),
         "tile_words": DYN_TILE_WORDS * p["n_tiles"],
         "scalars": {key: p[key] for key in ("M", "NL", "P", "L", "n_ctas")},
+        "no_tail": torch.full((n_frag, HALO), -1, dtype=torch.int32, device=device),
+        "halo": halo,
+    }
+
+
+def _l1o_host(
+    arch: str,
+    *,
+    S: int,
+    C: int,
+    n_frag: int,
+    tail_rows: int,
+    device: torch.device,
+    device_index: int,
+    reserve: int,
+) -> dict[str, Any]:
+    """The L1o route's host state of a call (:data:`kcp_jit.L1O_ROUTE`): the one-program backward's (kind ``kcp_bwd``)
+    launch plans over :func:`_bwd_grid` with ``reserve`` SMs left free, its plan scalars and accumulator layout, the
+    all ``-1`` table it runs with as ``tail_row_off`` (it writes every row, as at a document end), and the tail-row
+    program's launch plan as in :func:`_dyn_host` (``None`` when the rank receives no tail row)."""
+    names = selected_modules(arch, KCP_BWD, C=C, S=S)
+    record = _loader.MODULES[names[0]]
+    scalars = plan(S, C, n_frag, geometry=record["grid_rule"]["geometry"], legacy=True)
+    grid_x = launch_grid(record, device_index=device_index)[0]
+    if scalars["n_ch_tiles"] > grid_x:
+        raise ValueError(
+            f"C={C} spans more channel tiles than the backward's grid on this device holds"
+        )
+    halo = None
+    if tail_rows > 0:
+        (halo_name,) = route_modules(arch, KCP_BWD_HALO)
+        grid = head_grid(_loader.MODULES[halo_name], n_frag=n_frag, C=C)
+        halo = _launch_plan(halo_name, grid, device_index)
+    return {
+        "l1o": True,
+        "launches": tuple(
+            _launch_plan(
+                name,
+                _bwd_grid(_loader.MODULES[name], scalars["n_ch_tiles"], device_index, reserve),
+                device_index,
+            )
+            for name in names
+        ),
+        "layout": _accumulator_layout(record, C, scalars["n_ch_tiles"]),
+        "scalars": _scalars(scalars),
         "no_tail": torch.full((n_frag, HALO), -1, dtype=torch.int32, device=device),
         "halo": halo,
     }
@@ -1074,7 +1160,36 @@ def _launch_dyn(
     (``skip_row_off``: ``d["no_tail"]`` writes every row; the context's ``tail_row_off`` leaves the rows the tail-row
     program writes), a fragment's last rows without the successors' tail rows, as at a document end, and the rank's
     FP32 ``dweight`` partial, summed in the zeroed accumulator copies and words of the device's cached backward
-    workspace.  ``spare``: an FP32 ``[*, C]`` tensor passed as ``dpre_tail``, which no ``-1`` entry reads."""
+    workspace.  ``spare``: an FP32 ``[*, C]`` tensor passed as ``dpre_tail``, which no ``-1`` entry reads.  The L1o
+    route's state (``"l1o"``, :func:`_l1o_host`) launches the one-program backward instead."""
+    if d.get("l1o"):
+        # the L1o route (:func:`_l1o_host`): the one-program backward writes every row (``skip`` unused) and sums the
+        # rank's FP32 ``dweight`` partial in its own zeroed accumulators
+        acc, acc_work = _backward_accumulators(
+            None,
+            d["layout"],
+            device=device,
+            device_index=device_index,
+            entry="cake_causal_conv1d_nondet_train_kcp_backward",
+        )
+        values: dict[str, Any] = {
+            "x": x_flat,
+            "w": w,
+            "cu": cu,
+            "dy": dy_flat,
+            "dx": dx2,
+            "dw": dw_out,
+            "acc": acc,
+            "work": acc_work,
+            "hist": hist_t,
+            "hist_row_off": hist_row_off,
+            "dpre_tail": spare,
+            "tail_row_off": d["no_tail"],
+            **d["scalars"],
+        }
+        for info in d["launches"]:
+            _launch_trim(info, values, device_index)
+        return
     acc, words = _backward_accumulators(
         None,
         d["layout"],
@@ -2046,7 +2161,9 @@ def cake_causal_conv1d_nondet_train_kcp_backward(
     launches or exchanges anything.  Preallocated outputs: ``dx`` BF16 of ``x_local``'s shape and ``dweight`` FP32
     ``[C, 4]``, contiguous; ``dx`` and ``dweight`` must be 16-byte aligned (16-byte stores; ``ValueError``
     otherwise).  ``bwd_reserve_sms`` (``None`` = ``RESERVE_DEFAULT``):
-    the main backward's grid gives up that many SMs (:func:`_bwd_grid`); the graph key holds it.  ``ValueError`` for
+    ``K >= 1`` runs the one-program backward after the wait on a grid that gives up ``K`` SMs (:func:`_bwd_grid`; on a
+    B200 / GB300 key of the L1o route table the default call already gives up 3 / 10 SMs before the wait, so ``K``
+    adds headroom there only above that reserve and gives up the overlap); the graph key holds it.  ``ValueError`` for
     ``K >= 1`` on sm_107a (:data:`RESERVE_UNSUPPORTED`) or at the device's SM count or above.  ``dweight_sum``
     (``None`` = ``"fp32"``): ``"fp32_pair"`` runs the overlapped main program's FP32 hi/lo pair build (route
     ``kcp_bwd_dyn_pair``: the accumulator copies of a tile's ``dweight`` summed as an FP32 (hi, lo) pair, rounded
@@ -2580,7 +2697,11 @@ def _bwd_args(
 def _dyn_skip(e: dict[str, Any], side: Optional[torch.cuda.Stream]) -> torch.Tensor:
     """The main program's ``skip_row_off`` for a trimmed host-cache entry ``e``: the context's ``tail_row_off`` when
     the tail-row program runs on the side stream (``side``) beside it, so it leaves the rows that program writes;
-    else the all ``-1`` table (every row written, the tail-row program after it on the same stream)."""
+    else the all ``-1`` table (every row written, the tail-row program after it on the same stream).  The L1o route's
+    state (``"l1o"``) ignores the table: its one-program backward writes every row, and the tail-row program waits
+    for it.  In a multi call with a key tensor a non-key tensor still gets ``tail_row_off``, but the side stream
+    waits once for every main program on the caller's stream, so its tail-row program runs after them too (the same
+    rows, less overlap)."""
     if side is not None and e["dyn"]["halo"] is not None:
         return e["tail_row_off"]
     return e["dyn"]["no_tail"]
@@ -2606,8 +2727,10 @@ def _bwd_overlap(
     """The overlapped backward of a call with ``S > 0``: the main program while ``work`` (the exchange) is in flight.
     With ``side`` (the stream of the head program and the exchange issue) the main program leaves the tail-row
     program's rows (:func:`_dyn_skip`), and the side stream waits for the exchange and runs the tail-row program
-    beside it; the current stream then joins the side stream, also when a launch raises.  Without (``None``) the main
-    program writes every row, the current stream waits, then the tail-row program writes the tail rows again."""
+    beside it; on the L1o route (state ``"l1o"``) the one-program backward writes every row and the side stream also
+    waits for the current stream, so the tail-row program runs after it.  The current stream then joins the side
+    stream, also when a launch raises.  Without (``None``) the main program writes every row, the current stream
+    waits, then the tail-row program writes the tail rows again."""
     args = _bwd_args(e, x_flat, w, dy_flat, hist_t, dx_out, S=S, C=C)
     try:
         _launch_dyn(
@@ -2620,9 +2743,13 @@ def _bwd_overlap(
             **args,
         )
         if side is not None:
+            caller = torch.cuda.current_stream(device)
             with torch.cuda.stream(side):
                 if work is not None:
                     work.wait()
+                if e["dyn"].get("l1o"):
+                    # the L1o route's one-program backward writes the rows the tail-row program writes again
+                    side.wait_stream(caller)
                 _launch_halo(
                     e["dyn"],
                     tail_row_off=e["tail_row_off"],
@@ -2869,9 +2996,14 @@ def cake_causal_conv1d_nondet_kcp(
         The main backward here is always one ordinary launch, so ``None`` (default) and
         ``False`` mean the same; ``True`` raises ``ValueError`` and a non-``bool`` ``TypeError``.
     bwd_reserve_sms : int, optional
-        ``None`` (default) = ``RESERVE_DEFAULT`` = 0: the backward grid of :func:`_bwd_grid`.  ``K >= 1``: the main
-        backward launches its single-wave grid less ``K x ctas_per_sm`` CTAs, so it stays one wave while kernels of
-        other streams hold up to ``K`` SMs; it costs the unloaded backward the work of ``K`` SMs.  ``y``, ``dx`` and
+        ``None`` (default) = ``RESERVE_DEFAULT`` = 0: the default route (the overlapped pair; on a key of the L1o
+        route table the one-program backward before the wait with ``kcp_jit.L1O_RESERVE_SMS`` SMs free: 3 on B200,
+        10 on GB300, 0 on VR200; above ``DYN_MAX_CHANNELS`` channels or without tokens the one-program backward
+        after the wait on the grid of :func:`_bwd_grid`).  ``K >= 1``: the one-program backward runs after the wait
+        and launches its single-wave grid less ``K x ctas_per_sm`` CTAs, so it stays one wave while kernels of other
+        streams hold up to ``K`` SMs; it costs the unloaded backward the work of ``K`` SMs.  On a B200 / GB300 key
+        that grid is larger than the default's while ``K`` is below the reserve and the same at it, so ``K`` adds
+        headroom there only above the reserve, and it always gives up the overlap with the exchange.  ``y``, ``dx`` and
         the exchanges are unchanged; ``dweight`` is summed the same way.  ``TypeError`` for a ``bool`` or a
         non-``int``; ``ValueError`` below zero, at the device's SM count or above, or ``K >= 1`` on sm_107a
         (:data:`RESERVE_UNSUPPORTED`: the reserved grid is outside the opt-in's unloaded-cost limit there).  The
@@ -3403,7 +3535,9 @@ def _kcp_backward_multi(
             dw.zero_()
         return dx_out, dw_out
     # The overlapped tensors' main programs run while the exchange is in flight; every other launch follows the wait,
-    # on the side stream when the call has one (the main programs then leave the tail-row programs' rows).
+    # on the side stream when the call has one (off the L1o keys the main programs then leave the tail-row programs'
+    # rows; an L1o one-program backward writes them, and the side stream waits for the caller's stream below, before
+    # every tensor's tail-row program, the non-key tensors' included).
     try:
         for (S, C, x_flat, w, dy_flat, hist_t, dx, dw, e), head in zip(
             calls, heads, strict=True
@@ -3421,9 +3555,14 @@ def _kcp_backward_multi(
                 )
         if side is not None:
             in_place = len(calls) > 1 and len({c[1] for c in calls}) == 1
+            caller = torch.cuda.current_stream(device)
             with torch.cuda.stream(side):
                 if work is not None:
                     work.wait()
+                if any(c[8]["dyn"] is not None and c[8]["dyn"].get("l1o") for c in calls):
+                    # the L1o route's one-program backwards write the rows the tail-row programs write again; with
+                    # a key tensor in the call the non-key tensors' tail-row programs wait here too (less overlap)
+                    side.wait_stream(caller)
                 _multi_after_wait(calls, recv, tails, device, in_place=in_place)
     finally:
         _join_side(side, device)

@@ -1067,6 +1067,45 @@ DYN_CP_V2_LONG_TOKENS = 8192
 DYN_CP_V2_LONG4_ARCHES = ("sm_103a",)
 DYN_CP_V2_LONG4_WORLD = 4
 
+# The L1o route table (0.2.25): a backward call on one of these measured (architecture, SM count) devices whose
+# (world size, channels, tokens on the rank) is a listed key runs the one-program backward (kind ``kcp_bwd``) in place
+# of the overlapped pair's main program: launched on the current stream before the halo exchange's wait, with every
+# ``tail_row_off`` entry ``-1`` and its grid less ``L1O_RESERVE_SMS[arch]`` SMs' CTAs (``kcp._bwd_grid``); the tail-row
+# program runs after the exchange's wait and after that program.  ``dx`` is the overlapped pair's; ``dweight`` is
+# summed in the one-program backward's FP32 accumulators.  Measured on 148-SM B200, 152-SM GB300 and 212-SM VR200
+# (world sizes 2 / 4, and 8 on B200; backward and checkpointed step; contiguous and zigzag single-tensor and 3-tensor
+# eager calls, and graph replay): a key is listed when, on every call form timed on it in both of two runs on
+# different nodes, its backward ran faster than the better of the 0.2.23 and 0.2.24 plans beyond the noise band, its
+# checkpointed step ran no slower than the better of the two plans, and neither its backward nor its checkpointed
+# step ran slower than det (a form timed in one run only did not count; the
+# route takes every call form at a key; the nondet backend README names the forms the first run alone timed).  Every
+# other call (other devices, world sizes or shapes, and ``dweight_sum="fp32_pair"``) keeps the overlapped pair.  The
+# one-program grid is one wave with a static share of tokens per CTA: beside a kernel on another stream that holds
+# more than ``L1O_RESERVE_SMS[arch]`` SMs, the CTAs that do not fit wait for a free SM (a second wave).
+L1O_ROUTE: dict[tuple[str, int], frozenset[tuple[int, int, int]]] = {
+    ("sm_100a", 148): frozenset(
+        {(2, 256, 32768)}
+        | {(2, 512, s) for s in (4096, 8192, 12288, 16384, 18432, 20480, 24576, 26624, 28672, 32768)}
+        | {(2, 768, 16384), (2, 768, 32768), (2, 1024, 32768)}
+        | {(4, 512, s) for s in (4096, 16384, 18432, 24576, 32768)}
+        | {(8, 512, s) for s in (16384, 18432, 32768)}
+    ),
+    ("sm_103a", 152): frozenset(
+        {(2, 256, 32768)}
+        | {(2, 512, s) for s in (4096, 6144, 8192, 12288, 16384, 18432, 20480, 24576, 28672, 32768)}
+        | {(2, 768, 16384), (2, 768, 32768), (2, 1024, 32768)}
+        | {(4, 512, s) for s in (4096, 16384, 18432, 24576, 32768)}
+    ),
+    ("sm_107a", 212): frozenset(
+        {(2, 512, s) for s in (14336, 16384, 18432, 20480, 28672, 32768)}
+        | {(2, 768, 16384), (2, 768, 32768)}
+        | {(4, 512, s) for s in (4096, 16384, 32768)}
+    ),
+}
+# SMs the L1o route's one-program grid leaves free per architecture (the measured sub-arms: B200 3, GB300 10; VR200
+# none, i.e. the grid of :func:`kcp._bwd_grid` without a reserve)
+L1O_RESERVE_SMS = {"sm_100a": 3, "sm_103a": 10, "sm_107a": 0}
+
 
 def route_applies(*, device_capability: Sequence[int], kind: str) -> bool:
     """Whether the verified export owns one KCP training call on a device."""
@@ -1263,6 +1302,19 @@ def dyn_cp_v2_applies(
         and int(C) <= DYN_CP_MAX_CHANNELS
         and 1 <= int(S) <= DYN_CP_V2_MAX_TOKENS
     )
+
+
+def l1o_route(arch: str | None, sms: int, world_size: int | None, S: int, C: int) -> int | None:
+    """The SMs the L1o route's one-program backward leaves free (:data:`L1O_RESERVE_SMS`) when a call's (architecture,
+    SM count) device and (world size, channels, tokens on the rank) are a key of :data:`L1O_ROUTE`; ``None`` (the
+    overlapped pair) for every other call, and without an architecture or a world size."""
+
+    if arch is None or world_size is None:
+        return None
+    keys = L1O_ROUTE.get((arch, int(sms)))
+    if keys is None or (int(world_size), int(C), int(S)) not in keys:
+        return None
+    return L1O_RESERVE_SMS[arch]
 
 
 def dyn_cp_units(
@@ -1539,6 +1591,9 @@ __all__ = [
     "dyn_cp_v2_applies",
     "dyn_plan",
     "dyn_workspace_layout",
+    "L1O_RESERVE_SMS",
+    "L1O_ROUTE",
+    "l1o_route",
     "head_grid",
     "launch_grid",
     "library_name",

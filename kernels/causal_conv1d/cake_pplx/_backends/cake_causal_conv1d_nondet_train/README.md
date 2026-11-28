@@ -171,6 +171,8 @@ deterministic route's head program. Then:
    The FP32 `dweight` runs are added into four FP32
    accumulator copies in the order the runs end. The copies are summed once per
    channel tile (with `dweight_sum="fp32_pair"`, as an FP32 (hi, lo) pair).
+   On the keys of the L1o route table (below), the main program is the
+   one-program backward (`kcp_bwd`) instead.
 3. After the wait, on a rank that receives tail rows, the tail-row program
    (`kcp_bwd_halo`) writes `dx` of the last three rows of each such
    fragment from the received rows.
@@ -181,12 +183,17 @@ every row, and the tail-row program writes the tail rows again after it.
 With more than one rank, the head program, the concatenation of a multi
 call's send rows, the exchange issue, the wait and the tail-row program run on
 a high-priority side stream of the device. The main program starts on the
-caller's stream at once, because it reads no head row. It leaves the last rows
-of each fragment that receives tail rows to the tail-row program (its
-`skip_row_off` table is the context's `tail_row_off`). The two programs
-therefore write disjoint rows, and the tail-row program runs as soon as the
-exchange arrives, beside the main program instead of after it. The caller's
-stream joins the side stream after the main program. The buffers that the side
+caller's stream at once, because it reads no head row. Off the L1o keys, it
+leaves the last rows of each fragment that receives tail rows to the tail-row
+program (its `skip_row_off` table is the context's `tail_row_off`). The two
+programs therefore write disjoint rows, and the tail-row program runs as soon
+as the exchange arrives, beside the main program instead of after it. On a key,
+the main program (`kcp_bwd`) writes every row. The side stream then also waits
+for the caller's stream, so the tail-row program writes the tail rows again
+after it. In a multi call that mixes key and non-key tensors, the side stream
+waits once for all main programs. The non-key tensors' tail-row programs then
+also run after every main program on the caller's stream: the results are the
+same, with less overlap. The caller's stream joins the side stream after the main program. The buffers that the side
 stream fills are allocated on the caller's stream before the fork. The programs
 and their inputs are the same, and each `dx` row comes from the program that
 writes it with one rank.
@@ -248,6 +255,51 @@ slower and the faster backward rows ran at 0.86-0.95 of the time (idle-unit
 check), 0.80-0.90 (40-token units), 0.92-0.97 (56-token units from 8192
 tokens) and 0.92-0.95 (GB300, world size 4). Every other device, world size,
 channel count or sequence length keeps the plan above.
+
+On the keys of the L1o route table (`kcp_jit.L1O_ROUTE`, from 0.2.25) the
+overlapped backward runs the one-program backward (`kcp_bwd`) in place of
+`kcp_bwd_dyn`: launched before the wait, with every `tail_row_off` entry -1 and
+`kcp_jit.L1O_RESERVE_SMS` SMs of its grid left free (B200 3, GB300 10, VR200
+none). The tail-row program then waits for it as well as for the exchange.
+`dx` is unchanged; `dweight` is summed in the one-program backward's FP32
+accumulators. A key is a device, a world size, a channel count and a token
+count on the rank:
+
+| Device | World size | Channels: tokens on the rank |
+| --- | --- | --- |
+| B200 (148 SMs) | 2 | 256: 32768; 512: 4096, 8192, 12288, 16384, 18432, 20480, 24576, 26624, 28672, 32768; 768: 16384, 32768; 1024: 32768 |
+| B200 (148 SMs) | 4 | 512: 4096, 16384, 18432, 24576, 32768 |
+| B200 (148 SMs) | 8 | 512: 16384, 18432, 32768 |
+| GB300 (152 SMs) | 2 | 256: 32768; 512: 4096, 6144, 8192, 12288, 16384, 18432, 20480, 24576, 28672, 32768; 768: 16384, 32768; 1024: 32768 |
+| GB300 (152 SMs) | 4 | 512: 4096, 16384, 18432, 24576, 32768 |
+| VR200 (212 SMs) | 2 | 512: 14336, 16384, 18432, 20480, 28672, 32768; 768: 16384, 32768 |
+| VR200 (212 SMs) | 4 | 512: 4096, 16384, 32768 |
+
+Two runs on different nodes timed the candidate keys: a probe and a
+confirmation run. A key is listed when every call form timed on it in both
+runs (contiguous and zigzag single-tensor, three-tensor and CUDA Graph replay
+calls) met three conditions: its backward ran faster than the better of the
+0.2.23 and 0.2.24 plans beyond the noise band, its checkpointed backward ran
+no slower than the better of the two plans, and neither its backward nor its
+checkpointed backward ran slower than det. A form timed in one run only did not
+count. The route takes every call form at a key, also the forms that were not
+timed there. The probe alone timed four such cases at listed keys (two forms at
+the VR200 key, one form at each of the B200 and GB300 keys):
+
+- VR200, world size 4, 512 channels, 4096 tokens (listed from its three-tensor
+  form): the contiguous and zigzag single-tensor forms. With the route, all four
+  readings (backward and checkpointed backward of each form) were equal to the
+  0.2.24 plan within the noise band. Against det, the contiguous backward was
+  slower: 1.09 times det's time (median of 8 groups, 1.01-1.14), where the
+  0.2.24 plan was equal to det. The other three readings were equal to det.
+- B200 and GB300, world size 2, 512 channels, 8192 tokens: the zigzag
+  single-tensor form. With the route its backward was equal to the 0.2.24 plan
+  within the noise band (0.90 and 0.92 of its time) and faster than det (0.79
+  and 0.74 of det's time); its checkpointed backward was faster than both.
+
+These readings come from one run, and no release gate times these forms.
+Every other call keeps the overlapped pair, including
+`dweight_sum="fp32_pair"` calls, the 216-SM VR200 and shapes between the keys.
 
 Under any of these conditions, the one-program backward (`kcp_bwd`) runs after the wait instead:
 
@@ -322,14 +374,37 @@ There are no environment variables. Every setting is a keyword argument.
 | --- | --- | --- | --- |
 | `recompute_handle` | `CakeCausalConv1dNondetKcpRecomputeHandle()` or any object with an `entries` dict | `None` | The checkpoint recompute runs without the forward halo exchange (see below). |
 | `cooperative` | `None`, `False` | `None` | `None` and `False` mean the same. `True` raises `ValueError`. |
-| `bwd_reserve_sms` | int `K`, `0 <= K <` SM count | `None` (= 0) | `K >= 1` runs the one-program backward after the exchange with a grid `K x ctas_per_sm` CTAs short. Supported on SM100 / SM103 only; `ValueError` on SM107. A `bool` or a non-`int` raises `TypeError`. A value out of range raises `ValueError`. The forward and the exchanges are the same; `dweight` is summed the same way. Each rank may choose its own value. |
+| `bwd_reserve_sms` | int `K`, `0 <= K <` SM count | `None` (= 0) | `K >= 1` runs the one-program backward after the exchange with a grid `K x ctas_per_sm` CTAs short. On a B200 / GB300 key of the L1o route table the default already leaves 3 / 10 SMs free before the wait, so `K` adds headroom there only above 3 / 10. Supported on SM100 / SM103 only; `ValueError` on SM107. A `bool` or a non-`int` raises `TypeError`. A value out of range raises `ValueError`. The forward and the exchanges are the same; `dweight` is summed the same way. Each rank may choose its own value. |
 | `dweight_sum` | `None`, `"fp32"`, `"fp32_pair"` | `None` (= `"fp32"`) | `"fp32"`: one plain FP32 word per accumulator copy of `dweight`. `"fp32_pair"` is an opt-in: the overlapped backward's main program sums the accumulator copies of a tile as an FP32 (hi, lo) pair and rounds once, with FP32 operations only. It needs the overlapped backward: with `bwd_reserve_sms >= 1` the call raises `ValueError`, and a backward with tokens and `C > 65536` (`kcp_jit.DYN_MAX_CHANNELS`) raises `ValueError`. It never runs another program. Another string raises `ValueError`; a non-string raises `TypeError`. Each rank may choose its own value. |
 | `graph` | `"replay"` | omitted (eager) | Explicit `kcp` calls only: keyed CUDA-graph capture and replay. |
 
 ### Sharing the GPU with other streams
 
-The overlapped backward is the default and needs no setting. Its CTAs claim
-their tokens at run time. A repro timed the KCP
+Off the keys of the L1o route table, the overlapped backward is the default and
+needs no setting. Its CTAs claim their tokens at run time.
+
+On a key (`kcp_jit.L1O_ROUTE`), the main program is the one-program backward
+(`kcp_bwd`). Its grid is one wave, and each CTA has a fixed share of the
+tokens. The grid leaves `kcp_jit.L1O_RESERVE_SMS` SMs free: 3 on B200, 10 on
+GB300 and none on VR200. A kernel on another stream that holds more SMs than
+that leaves some CTAs without an SM. Those CTAs wait until an SM is free and
+run as a second wave, so the backward takes longer. The call does not
+deadlock: there is no grid barrier and no cooperative launch. The "previous
+backward" column of the table below shows a program of this kind beside such a
+kernel (shapes A and B are not keys). No key was timed beside a kernel on
+another stream. On a key, a call can set:
+
+- `bwd_reserve_sms=K` (SM100 / SM103 only): the one-program backward runs after
+  the exchange's wait with a grid `K` SMs short, so a kernel holding up to `K`
+  SMs leaves it in one wave (see below). The default already leaves 3 SMs free
+  on B200 and 10 on GB300, before the wait. `K` adds headroom only when it is
+  above that number: a smaller `K` gives a larger grid, and an equal `K` the
+  same grid. Any `K >= 1` gives up the overlap with the exchange.
+- `dweight_sum="fp32_pair"`: the call is never routed, so its main program
+  claims its tokens at run time. It also changes how `dweight` is summed (see
+  Keyword controls). On SM107 this is the only such setting.
+
+A repro timed the KCP
 backward at world 4 with CUDA events, alone and next to a kernel on another
 stream. It used two per-rank shapes:
 
@@ -362,7 +437,10 @@ ratio. For shape A on B200 and for shape B on both GPUs it is at most 0.07 above
 `bwd_reserve_sms=K` is an opt-in alternative (SM100 / SM103 only). It runs the one-program backward
 after the exchange with a grid `K x ctas_per_sm` CTAs short. A kernel holding up
 to `K` SMs then does not push the top CTAs into a second wave. The unloaded
-backward gives up the work of those `K` SMs. On sm_107a it raises
+backward gives up the work of those `K` SMs. On a B200 or GB300 key of the L1o
+route table, the default call already leaves 3 or 10 SMs free and runs before
+the wait. There, `K` adds headroom only when it is above 3 or 10, and any
+`K >= 1` gives up the overlap with the exchange. On sm_107a it raises
 `ValueError`: there, the reserved grid costs up to 1.055x the default grid
 unloaded (C 1024, 62585 tokens), which is above the opt-in's 1.040 limit.
 
@@ -389,6 +467,6 @@ tensors that share the context, such as a layer's q, k and v. It uses one halo e
 direction instead of `n`.
 
 - Inputs: each `xs[i]` is BF16 `[T_r, C_i]` and each `weights[i]` is FP32 `[C_i, 4]`. Each `C_i` is a multiple of 8, and they may differ.
-- Exchange: the tensors' send rows travel side by side in one `all_to_all_single`. After the wait, when the call uses the side stream (more than one rank, every tensor on the overlapped pair) and every tensor has the same width, each tensor's tail-row program reads its rows in place in the received pool, and the programs run concurrently on the side stream and streams forked from it. Otherwise the rows are copied into each tensor's own pool.
+- Exchange: the tensors' send rows travel side by side in one `all_to_all_single`. After the wait, when the call uses the side stream (more than one rank, every tensor on the overlapped backward: the overlapped pair or the L1o route) and every tensor has the same width, each tensor's tail-row program reads its rows in place in the received pool, and the programs run concurrently on the side stream and streams forked from it. Otherwise the rows are copied into each tensor's own pool. When at least one tensor is on an L1o key, the side stream first waits for every main program on the caller's stream, so the other tensors' tail-row programs also run after them (the same results, less overlap).
 - Programs: each tensor then runs the single call's programs. In the forward on sm_107a, the first tensor's main program runs before the wait (see The forward). Each `dweight` is that tensor's own unordered partial.
 - Keywords: one `bwd_reserve_sms` value and one `dweight_sum` value apply to every tensor. One recompute handle covers the whole call; its `"conv"` entry holds the `n` history pools.
