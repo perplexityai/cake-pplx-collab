@@ -681,8 +681,13 @@ kernel_cake_mok_recompute_situ_noshared(const __grid_constant__ CUtensorMap x_ro
                                     int _stage_gemm_arrived = (int)((unsigned int)(gemm_wide + idx_1) % 4);
                                     int _parity_gemm_arrived = (int)((unsigned int)(gemm_wide + idx_1) / 4 % 2);
                                     mbarrier_wait(gemm_arrived_addr + (_stage_gemm_arrived) * 8, _parity_gemm_arrived);
+#if __CUDA_ARCH__ == 1070
+                                    int _smem_desc_lo_5 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_1) % 4) * 1024;
+                                    int _smem_desc_lo_6 = (((b_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_1) % 4) * 1024;
+#else
                                     int _smem_desc_lo_5 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_1) % 4) * 1024;
                                     int _smem_desc_lo_6 = (((b_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_1) % 4) * 1024;
+#endif
                                     asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -724,8 +729,13 @@ kernel_cake_mok_recompute_situ_noshared(const __grid_constant__ CUtensorMap x_ro
                                 asm volatile("tcgen05.fence::after_thread_sync;");
                                 #pragma unroll 1
                                 for (int idx_2 = 0; idx_2 < head; idx_2++) {
+#if __CUDA_ARCH__ == 1070
+                                    int _smem_desc_lo_7 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_2) % 4) * 1024;
+                                    int _smem_desc_lo_8 = (((b_hi_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_2) % 4) * 1024;
+#else
                                     int _smem_desc_lo_7 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_2) % 4) * 1024;
                                     int _smem_desc_lo_8 = (((b_hi_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_2) % 4) * 1024;
+#endif
                                     asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -768,8 +778,13 @@ kernel_cake_mok_recompute_situ_noshared(const __grid_constant__ CUtensorMap x_ro
                                     int _stage_gemm_arrived_1 = (int)((unsigned int)(gemm_wide + idx_3) % 4);
                                     int _parity_gemm_arrived_1 = (int)((unsigned int)(gemm_wide + idx_3) / 4 % 2);
                                     mbarrier_wait(gemm_arrived_addr + (_stage_gemm_arrived_1) * 8, _parity_gemm_arrived_1);
+#if __CUDA_ARCH__ == 1070
+                                    int _smem_desc_lo_9 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_3) % 4) * 1024;
+                                    int _smem_desc_lo_10 = (((b_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_3) % 4) * 1024;
+#else
                                     int _smem_desc_lo_9 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_3) % 4) * 1024;
                                     int _smem_desc_lo_10 = (((b_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_3) % 4) * 1024;
+#endif
                                     asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -804,8 +819,13 @@ kernel_cake_mok_recompute_situ_noshared(const __grid_constant__ CUtensorMap x_ro
             "tcgen05.mma.cta_group::2.kind::f16 [%2], da, db, id, {m0, m1, m2, m3, m4, m5, m6, m7}, p1;\n\t"
             "}\n"
             :: "r"(_smem_desc_lo_9), "r"(_smem_desc_lo_10), "r"(tmem_accumulator), "r"(((idx_3 == 0) ? 0 : 1)) : "memory");
+#if __CUDA_ARCH__ == 1070
+                                    int _smem_desc_lo_11 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_3) % 4) * 1024;
+                                    int _smem_desc_lo_12 = (((b_hi_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_3) % 4) * 1024;
+#else
                                     int _smem_desc_lo_11 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_3) % 4) * 1024;
                                     int _smem_desc_lo_12 = (((b_hi_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_3) % 4) * 1024;
+#endif
                                     asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -848,8 +868,13 @@ kernel_cake_mok_recompute_situ_noshared(const __grid_constant__ CUtensorMap x_ro
                                     int _stage_gemm_arrived_2 = (int)((unsigned int)(gemm_wide + idx_4) % 4);
                                     int _parity_gemm_arrived_2 = (int)((unsigned int)(gemm_wide + idx_4) / 4 % 2);
                                     mbarrier_wait(gemm_arrived_addr + (_stage_gemm_arrived_2) * 8, _parity_gemm_arrived_2);
+#if __CUDA_ARCH__ == 1070
+                                    int _smem_desc_lo_13 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_4) % 4) * 1024;
+                                    int _smem_desc_lo_14 = (((b_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_4) % 4) * 1024;
+#else
                                     int _smem_desc_lo_13 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_4) % 4) * 1024;
                                     int _smem_desc_lo_14 = (((b_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_4) % 4) * 1024;
+#endif
                                     asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -888,8 +913,13 @@ kernel_cake_mok_recompute_situ_noshared(const __grid_constant__ CUtensorMap x_ro
                                 tcgen05_commit_cg2_multicast(output_arrived_addr, (uint16_t)(3));
                                 #pragma unroll 1
                                 for (int idx_5 = iterations - tail_1; idx_5 < iterations; idx_5++) {
+#if __CUDA_ARCH__ == 1070
+                                    int _smem_desc_lo_15 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_5) % 4) * 1024;
+                                    int _smem_desc_lo_16 = (((b_hi_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_5) % 4) * 1024;
+#else
                                     int _smem_desc_lo_15 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_5) % 4) * 1024;
                                     int _smem_desc_lo_16 = (((b_hi_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_5) % 4) * 1024;
+#endif
                                     asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"

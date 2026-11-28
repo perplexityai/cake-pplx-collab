@@ -132,7 +132,7 @@ MODE_GROUPS = {
         shared_expert="scaled",
         router_weight_gradient="direct",
         fp32_wgrad=True,
-        targets=("sm_100a", "sm_103a"),
+        targets=("sm_100a", "sm_103a", "sm_107a"),
         description="512 routed experts at top-k 10 with the per-token shared-expert scale",
     ),
     "situ_top16": ModeGroup(
@@ -142,7 +142,7 @@ MODE_GROUPS = {
         shared_expert="none",
         router_weight_gradient="direct",
         fp32_wgrad=True,
-        targets=("sm_100a", "sm_103a"),
+        targets=("sm_100a", "sm_103a", "sm_107a"),
         description="896 routed experts at top-k 16 with SiTU-GLU and no shared expert",
     ),
 }
@@ -351,7 +351,8 @@ def check_target(router_weight_position, arch, group=None, mxfp8_transposed="sou
             "sm_107a device"
         )
     if group is not None and arch not in MODE_GROUPS[group].targets:
-        targets = " or ".join(MODE_GROUPS[group].targets)
+        *first, last = MODE_GROUPS[group].targets
+        targets = f"{', '.join(first)} or {last}" if first else last
         raise ValueError(
             f"{MODE_GROUPS[group].description} has no {arch} build in this "
             f"package; use an {targets} device"

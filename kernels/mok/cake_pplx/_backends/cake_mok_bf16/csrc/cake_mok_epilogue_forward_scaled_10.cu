@@ -39,8 +39,11 @@ __device__ __forceinline__ int make_warp_uniform(int x) {
                  : "=r"(result) : "r"(x));
     return result;
 }
+#if __CUDA_ARCH__ == 1070
+#else
 
 #define LAUNCH_MIN_BLOCKS 4
+#endif
 
 #include <math_constants.h>
 
@@ -79,7 +82,11 @@ __device__ __forceinline__ float mul_f32_rn_noftz(float a, float b) {
 
 extern "C" {
 
+#if __CUDA_ARCH__ == 1070
+__global__ __launch_bounds__(256) void
+#else
 __global__ __launch_bounds__(256, LAUNCH_MIN_BLOCKS) void
+#endif
 kernel_cake_mok_epilogue_forward_scaled_10(__nv_bfloat16* __restrict__ shared, __nv_bfloat16* __restrict__ routed, float* __restrict__ scores, float* __restrict__ shared_scale, unsigned int* __restrict__ output, int tokens, int hidden, int ctas)
 {
     const int tid = threadIdx.x;

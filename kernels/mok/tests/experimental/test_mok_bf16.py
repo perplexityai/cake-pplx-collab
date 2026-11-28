@@ -3293,7 +3293,7 @@ def test_mode_group_configuration_is_checked_before_device_work(monkeypatch):
     epilogues, the shared-scale helpers, the (8, 64) scheduler kernels) and none of the quotient backward or the
     unscaled epilogues."""
     group = kernels.MODE_GROUPS["scaled_top10"]
-    assert group.targets == ("sm_100a", "sm_103a")
+    assert group.targets == ("sm_100a", "sm_103a", "sm_107a")
     assert kernels.check_configuration(8, 64, 10, **GROUP_OK) == "scaled_top10"
     defaults = dict(
         clamped_swiglu=False, fp32_wgrad=False, router_weight_position="after_down"
@@ -3307,19 +3307,15 @@ def test_mode_group_configuration_is_checked_before_device_work(monkeypatch):
         kernels.check_target("after_down", arch, "scaled_top10")
     with pytest.raises(
         ValueError,
-        match="no sm_107a build in this package; use an sm_100a or sm_103a device",
+        match="no sm_90a build in this package; use an sm_100a, sm_103a or sm_107a device",
     ):
-        kernels.check_target("after_down", "sm_107a", "scaled_top10")
+        kernels.check_target("after_down", "sm_90a", "scaled_top10")
     loaded = []
     _group_stub_loader(monkeypatch, loaded)
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
     keywords = dict(
         fp32_wgrad=True, router_weight_gradient="direct", shared_expert="scaled"
     )
-    monkeypatch.setattr(jit, "target_arch", lambda device=None: "sm_107a")
-    with pytest.raises(ValueError, match="no sm_107a build"):
-        backend.MoKFunctional(8, 64, 10, **keywords)
-    assert loaded == []
     for arch in group.targets:
         monkeypatch.setattr(jit, "target_arch", lambda device=None, arch=arch: arch)
         loaded.clear()
@@ -3500,30 +3496,26 @@ def test_situ_group_configurations_outside_the_group_are_refused(layout, topk, c
 
 def test_situ_group_configuration_is_checked_before_device_work(monkeypatch):
     """Host only: ``check_configuration`` admits the 896-expert top-16 group's configuration and returns its name;
-    ``check_target`` accepts the group on SM100a and SM103a and refuses it on SM107a.  On an SM107a device the adapter
-    refuses the group before it loads a kernel; on SM100a and SM103a the adapter (prepared for the context-free forward
-    and the recompute) loads the group's roles (the SiTU-GLU forward, context-free forward, recompute and backward
+    ``check_target`` accepts the group on SM100a, SM103a and SM107a and refuses it elsewhere with a message naming the
+    three.  On each of them the adapter (prepared for the context-free forward and the recompute) loads the group's
+    roles (the SiTU-GLU forward, context-free forward, recompute and backward
     without a shared expert, the top-16 epilogues without a shared row, the (64, 14) scheduler kernels) and none of
     the SwiGLU fused kernels or the top-8 epilogues."""
     group = SITU_GROUP
-    assert group.targets == ("sm_100a", "sm_103a")
+    assert group.targets == ("sm_100a", "sm_103a", "sm_107a")
     assert group.layouts == ((64, 14),) and group.topk == 16
     assert kernels.check_configuration(64, 14, 16, **SITU_OK) == "situ_top16"
     for arch in group.targets:
         kernels.check_target("after_down", arch, "situ_top16")
     with pytest.raises(
         ValueError,
-        match="896 routed experts .* has no sm_107a build in this package; use an sm_100a or sm_103a device",
+        match="896 routed experts .* has no sm_90a build in this package; use an sm_100a, sm_103a or sm_107a device",
     ):
-        kernels.check_target("after_down", "sm_107a", "situ_top16")
+        kernels.check_target("after_down", "sm_90a", "situ_top16")
     loaded = []
     _group_stub_loader(monkeypatch, loaded)
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
     keywords = {key: SITU_OK[key] for key in ("fp32_wgrad", "router_weight_gradient", "shared_expert", "activation")}
-    monkeypatch.setattr(jit, "target_arch", lambda device=None: "sm_107a")
-    with pytest.raises(ValueError, match="no sm_107a build"):
-        backend.MoKFunctional(64, 14, 16, **keywords)
-    assert loaded == []
     for arch in group.targets:
         monkeypatch.setattr(jit, "target_arch", lambda device=None, arch=arch: arch)
         loaded.clear()
