@@ -171,6 +171,8 @@ deterministic route's head program. Then:
    The FP32 `dweight` runs are added into four FP32
    accumulator copies in the order the runs end. The copies are summed once per
    channel tile (with `dweight_sum="fp32_pair"`, as an FP32 (hi, lo) pair).
+   On the keys of the L1o route table (below), the main program is the
+   one-program backward (`kcp_bwd`) instead.
 3. After the wait, on a rank that receives tail rows, the tail-row program
    (`kcp_bwd_halo`) writes `dx` of the last three rows of each such
    fragment from the received rows.
@@ -181,12 +183,14 @@ every row, and the tail-row program writes the tail rows again after it.
 With more than one rank, the head program, the concatenation of a multi
 call's send rows, the exchange issue, the wait and the tail-row program run on
 a high-priority side stream of the device. The main program starts on the
-caller's stream at once, because it reads no head row. It leaves the last rows
-of each fragment that receives tail rows to the tail-row program (its
-`skip_row_off` table is the context's `tail_row_off`). The two programs
-therefore write disjoint rows, and the tail-row program runs as soon as the
-exchange arrives, beside the main program instead of after it. The caller's
-stream joins the side stream after the main program. The buffers that the side
+caller's stream at once, because it reads no head row. Off the L1o keys, it
+leaves the last rows of each fragment that receives tail rows to the tail-row
+program (its `skip_row_off` table is the context's `tail_row_off`). The two
+programs therefore write disjoint rows, and the tail-row program runs as soon
+as the exchange arrives, beside the main program instead of after it. On a key,
+the main program (`kcp_bwd`) writes every row. The side stream then also waits
+for the caller's stream, so the tail-row program writes the tail rows again
+after it. The caller's stream joins the side stream after the main program. The buffers that the side
 stream fills are allocated on the caller's stream before the fork. The programs
 and their inputs are the same, and each `dx` row comes from the program that
 writes it with one rank.
@@ -268,13 +272,29 @@ count on the rank:
 | VR200 (212 SMs) | 2 | 512: 14336, 16384, 18432, 20480, 28672, 32768; 768: 16384, 32768 |
 | VR200 (212 SMs) | 4 | 512: 4096, 16384, 32768 |
 
-A key is listed when, in two runs on different nodes, its backward ran faster
-than the better of the 0.2.23 and 0.2.24 plans beyond the noise band and
-neither its backward nor its checkpointed backward ran slower than det, on
-every call form timed on it (contiguous and zigzag single-tensor, three-tensor
-and CUDA Graph replay calls). Every other call keeps the overlapped pair,
-including `dweight_sum="fp32_pair"` calls, the 216-SM VR200 and shapes between
-the keys.
+Two runs on different nodes timed the candidate keys: a probe and a
+confirmation run. A key is listed when every call form timed on it in both
+runs (contiguous and zigzag single-tensor, three-tensor and CUDA Graph replay
+calls) met two conditions: its backward ran faster than the better of the
+0.2.23 and 0.2.24 plans beyond the noise band, and neither its backward nor its
+checkpointed backward ran slower than det. A form timed in one run only did not
+count. The route takes every call form at a key, also the forms that were not
+timed there. The probe alone timed three such forms at listed keys:
+
+- VR200, world size 4, 512 channels, 4096 tokens (listed from its three-tensor
+  form): the contiguous and zigzag single-tensor forms. With the route, all four
+  readings (backward and checkpointed backward of each form) were equal to the
+  0.2.24 plan within the noise band. Against det, the contiguous backward was
+  slower: 1.09 times det's time (median of 8 groups, 1.01-1.14), where the
+  0.2.24 plan was equal to det. The other three readings were equal to det.
+- B200 and GB300, world size 2, 512 channels, 8192 tokens: the zigzag
+  single-tensor form. With the route its backward was equal to the 0.2.24 plan
+  within the noise band (0.90 and 0.92 of its time) and faster than det (0.79
+  and 0.74 of det's time); its checkpointed backward was faster than both.
+
+These readings come from one run, and no release gate times these forms.
+Every other call keeps the overlapped pair, including
+`dweight_sum="fp32_pair"` calls, the 216-SM VR200 and shapes between the keys.
 
 Under any of these conditions, the one-program backward (`kcp_bwd`) runs after the wait instead:
 
@@ -355,8 +375,28 @@ There are no environment variables. Every setting is a keyword argument.
 
 ### Sharing the GPU with other streams
 
-The overlapped backward is the default and needs no setting. Its CTAs claim
-their tokens at run time. A repro timed the KCP
+Off the keys of the L1o route table, the overlapped backward is the default and
+needs no setting. Its CTAs claim their tokens at run time.
+
+On a key (`kcp_jit.L1O_ROUTE`), the main program is the one-program backward
+(`kcp_bwd`). Its grid is one wave, and each CTA has a fixed share of the
+tokens. The grid leaves `kcp_jit.L1O_RESERVE_SMS` SMs free: 3 on B200, 10 on
+GB300 and none on VR200. A kernel on another stream that holds more SMs than
+that leaves some CTAs without an SM. Those CTAs wait until an SM is free and
+run as a second wave, so the backward takes longer. The call does not
+deadlock: there is no grid barrier and no cooperative launch. The "previous
+backward" column of the table below shows a program of this kind beside such a
+kernel (shapes A and B are not keys). No key was timed beside a kernel on
+another stream. On a key, a call can set:
+
+- `bwd_reserve_sms=K` (SM100 / SM103 only): the one-program backward runs after
+  the exchange with a grid `K` SMs short, so a kernel holding up to `K` SMs
+  leaves it in one wave (see below).
+- `dweight_sum="fp32_pair"`: the call is never routed, so its main program
+  claims its tokens at run time. It also changes how `dweight` is summed (see
+  Keyword controls). On SM107 this is the only such setting.
+
+A repro timed the KCP
 backward at world 4 with CUDA events, alone and next to a kernel on another
 stream. It used two per-rank shapes:
 

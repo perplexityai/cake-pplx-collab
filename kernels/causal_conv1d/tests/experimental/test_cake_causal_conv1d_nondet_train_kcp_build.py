@@ -780,6 +780,75 @@ def test_dyn_plan_unit_table_measured_parts() -> None:
     assert all(n > 0 for n in taken.values()), taken
 
 
+# The L1o route table's keys per (architecture, SM count): (world size, channels, tokens on the rank).
+L1O_KEYS = {
+    ("sm_100a", 148): frozenset(
+        {
+            (2, 256, 32768),
+            (2, 512, 4096),
+            (2, 512, 8192),
+            (2, 512, 12288),
+            (2, 512, 16384),
+            (2, 512, 18432),
+            (2, 512, 20480),
+            (2, 512, 24576),
+            (2, 512, 26624),
+            (2, 512, 28672),
+            (2, 512, 32768),
+            (2, 768, 16384),
+            (2, 768, 32768),
+            (2, 1024, 32768),
+            (4, 512, 4096),
+            (4, 512, 16384),
+            (4, 512, 18432),
+            (4, 512, 24576),
+            (4, 512, 32768),
+            (8, 512, 16384),
+            (8, 512, 18432),
+            (8, 512, 32768),
+        }
+    ),
+    ("sm_103a", 152): frozenset(
+        {
+            (2, 256, 32768),
+            (2, 512, 4096),
+            (2, 512, 6144),
+            (2, 512, 8192),
+            (2, 512, 12288),
+            (2, 512, 16384),
+            (2, 512, 18432),
+            (2, 512, 20480),
+            (2, 512, 24576),
+            (2, 512, 28672),
+            (2, 512, 32768),
+            (2, 768, 16384),
+            (2, 768, 32768),
+            (2, 1024, 32768),
+            (4, 512, 4096),
+            (4, 512, 16384),
+            (4, 512, 18432),
+            (4, 512, 24576),
+            (4, 512, 32768),
+        }
+    ),
+    ("sm_107a", 212): frozenset(
+        {
+            (2, 512, 14336),
+            (2, 512, 16384),
+            (2, 512, 18432),
+            (2, 512, 20480),
+            (2, 512, 28672),
+            (2, 512, 32768),
+            (2, 768, 16384),
+            (2, 768, 32768),
+            (4, 512, 4096),
+            (4, 512, 16384),
+            (4, 512, 32768),
+        }
+    ),
+}
+
+
 @pytest.mark.cpu_only
 def test_l1o_route_table() -> None:
     """The L1o route (``kcp_jit.l1o_route``) applies exactly on the keys of ``kcp_jit.L1O_ROUTE`` (a measured
@@ -791,6 +860,8 @@ def test_l1o_route_table() -> None:
     table = kcp_jit.L1O_ROUTE
     reserve = kcp_jit.L1O_RESERVE_SMS
     assert {k: len(v) for k, v in table.items()} == {("sm_100a", 148): 22, ("sm_103a", 152): 19, ("sm_107a", 212): 11}
+    # the key set of each device, written out (the backend README's table): any moved, added or dropped key fails
+    assert table == L1O_KEYS
     assert reserve == {"sm_100a": 3, "sm_103a": 10, "sm_107a": 0}
     for (arch, sms), keys in table.items():
         worlds = {w for w, _, _ in keys}
@@ -814,6 +885,102 @@ def test_l1o_route_table() -> None:
         for other_arch in ("sm_100a", "sm_103a", "sm_107a"):
             if (other_arch, sms) not in table:
                 assert all(route(other_arch, sms, W, S, C) is None for W, C, S in keys), (other_arch, sms)
+
+
+@pytest.mark.cpu_only
+def test_dyn_host_route_state(monkeypatch) -> None:
+    """``kcp._dyn_host`` passes the architecture, the device's SM count and the call's world size to
+    ``kcp_jit.l1o_route`` and ``kcp_jit.dyn_plan``.  On every key of ``kcp_jit.L1O_ROUTE`` (sm_107a with its reserve
+    0 included) it returns the L1o state (``kcp._l1o_host``): ``"l1o"``, the ``kcp_bwd`` records the call selects,
+    each launched over ``kcp._bwd_grid`` with the architecture's reserve (a single-wave grid less ``reserve x
+    ctas_per_sm`` CTAs), an all ``-1`` ``no_tail`` table and the tail-row plan only when the rank receives tail rows;
+    no work plan is made.  A ``pair`` call, a call without a world size, another SM count or a shape off the keys gets
+    the overlapped pair's state (``"main"``, no ``"l1o"``) from ``dyn_plan`` with the architecture.  The device side
+    (SM count, architecture, launch grid, module loads) is stubbed."""
+
+    kcp = cake_package(KEY, "kcp")
+    device = {"arch": "sm_100a", "sms": 148}
+    routed: list[tuple] = []
+    planned: list[dict] = []
+    real_route, real_plan = kcp.l1o_route, kcp.dyn_plan
+
+    def grid(record, *, device_index, C=None, S=None):
+        rule = record["grid_rule"]
+        n = int(rule["ctas_per_sm"]) * int(rule["grid_mult"][device["arch"]]) * device["sms"]
+        return (n, 1, 1)
+
+    def route(*args):
+        routed.append(args)
+        return real_route(*args)
+
+    def dyn_plan(*args, **kwargs):
+        planned.append(dict(kwargs, args=args))
+        return real_plan(*args, **kwargs)
+
+    monkeypatch.setattr(kcp._loader, "sm_count", lambda device_index: device["sms"])
+    monkeypatch.setattr(kcp._loader, "device_arch", lambda device_index: device["arch"])
+    monkeypatch.setattr(kcp, "launch_grid", grid)
+    monkeypatch.setattr(kcp, "_launch_plan", lambda name, grid_, device_index: (name, tuple(grid_)))
+    monkeypatch.setattr(kcp, "l1o_route", route)
+    monkeypatch.setattr(kcp, "dyn_plan", dyn_plan)
+    cpu = torch.device("cpu")
+
+    def host(arch, W, C, S, *, tail_rows=3, pair=False):
+        routed.clear()
+        planned.clear()
+        return kcp._dyn_host(
+            arch, S=S, C=C, n_frag=3, tail_rows=tail_rows, device=cpu, device_index=0, pair=pair, world_size=W
+        )
+
+    def overlapped_pair(state, arch, W, S, label):
+        assert "l1o" not in state and "main" in state, label
+        (seen,) = planned
+        assert seen["arch"] == arch and seen["world_size"] == W and seen["args"][:3] == (S, 512, device["sms"]), label
+
+    n_keys = 0
+    for (arch, sms), keys in kcp_jit.L1O_ROUTE.items():
+        device.update(arch=arch, sms=sms)
+        reserve = kcp_jit.L1O_RESERVE_SMS[arch]
+        for W, C, S in sorted(keys):
+            label = (arch, sms, W, C, S)
+            for tail_rows in (3, 0):
+                state = host(arch, W, C, S, tail_rows=tail_rows)
+                assert routed == [(arch, sms, W, S, C)] and not planned, label
+                assert state["l1o"] is True, label
+                names = kcp_jit.selected_modules(arch, kcp.KCP_BWD, C=C, S=S)
+                assert tuple(name for name, _ in state["launches"]) == names, label
+                tiles = kcp.plan(
+                    S, C, 3, geometry=kcp_jit.MODULES[names[0]]["grid_rule"]["geometry"], legacy=True
+                )["n_ch_tiles"]
+                for name, launch in state["launches"]:
+                    rule = kcp_jit.MODULES[name]["grid_rule"]
+                    k = int(rule["ctas_per_sm"])
+                    full = grid(kcp_jit.MODULES[name], device_index=0)[0]
+                    single_wave = int(rule["grid_mult"][arch]) == 1
+                    if reserve and single_wave:
+                        want = full - reserve * k  # the L1o reserve
+                    elif single_wave and full % tiles >= k:
+                        want = full - k  # the trim of every single-wave backward grid
+                    else:
+                        want = full
+                    assert launch == (want, 1, 1), (label, name, launch, want)
+                assert state["no_tail"].shape == (3, kcp.HALO), label
+                assert bool((state["no_tail"] == -1).all()), label
+                assert (state["halo"] is None) == (tail_rows == 0), label
+            n_keys += 1
+    assert n_keys == 52
+    # every other call keeps the overlapped pair, with the architecture in its work plan
+    for arch, sms, W, S in (("sm_100a", 148, 2, 4096), ("sm_103a", 152, 4, 4096), ("sm_107a", 212, 4, 4096)):
+        device.update(arch=arch, sms=sms)
+        assert host(arch, W, 512, S)["l1o"] is True, arch
+        overlapped_pair(host(arch, W, 512, S, pair=True), arch, W, S, (arch, "pair"))
+        assert not routed, arch  # a pair call never asks the route
+        overlapped_pair(host(arch, None, 512, S), arch, None, S, (arch, "no world size"))
+        assert routed == [(arch, sms, None, S, 512)], arch
+        overlapped_pair(host(arch, W, 512, S + 8), arch, W, S + 8, (arch, "off the keys"))
+        overlapped_pair(host(arch, 3, 512, S), arch, 3, S, (arch, "world size 3"))
+        device.update(sms=sms + 4)
+        overlapped_pair(host(arch, W, 512, S), arch, W, S, (arch, "another SM count"))
 
 
 @pytest.mark.cpu_only

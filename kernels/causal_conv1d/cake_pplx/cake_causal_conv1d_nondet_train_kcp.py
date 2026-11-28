@@ -39,10 +39,16 @@ Contract: the context of the KDA step (``CakeKDADetKcpContext`` from
 ``cake_pplx.cake_kda_det_train_kcp.cake_kda_det_train_kcp_build_context``), FP32 taps and no bias, the halo exchanges (one
 ``all_to_all_single`` per direction, with recompute handles for communication-free checkpoint recomputes),
 the recompute-handle rules and the multi-tensor calls are the deterministic KCP package's.  The backward overlaps
-the halo exchange: its main program runs before the exchange is waited (no cooperative attribute, no grid barrier;
-its CTAs claim their tokens at run time, so a kernel resident on another stream slows it about in proportion to the
-SMs it holds) and adds the FP32 ``dweight`` runs into zeroed accumulators with unordered global reductions; a tail-row
-program then writes ``dx`` of the fragments' last rows from the received rows.  The package makes no bit promise
+the halo exchange: its main program runs before the exchange is waited (no cooperative attribute, no grid barrier)
+and adds the FP32 ``dweight`` runs into zeroed accumulators with unordered global reductions; a tail-row program then
+writes ``dx`` of the fragments' last rows from the received rows.  Off the keys of the L1o route table (below) the main
+program's CTAs claim their tokens at run time, so a kernel resident on another stream slows it about in proportion to
+the SMs it holds.  On a key (``kcp_jit.L1O_ROUTE``: a measured device, world size, channel count and token count on
+the rank; never with ``dweight_sum="fp32_pair"``) the main program is the one-program backward instead: a fixed grid
+of one wave with a static share of tokens per CTA, ``kcp_jit.L1O_RESERVE_SMS`` SMs short (B200 3, GB300 10, VR200
+none).  A kernel on another stream that holds more SMs than that makes the CTAs that do not fit wait for an SM to free
+up and run as a second wave, so the backward takes longer; it does not deadlock (no grid barrier, no cooperative
+launch).  The tail-row program on a key runs after the one-program backward.  The package makes no bit promise
 for any output (run to run or against the deterministic KCP entry point).  By default (``dweight_sum="fp32"``) the
 rank-local FP32 ``dweight`` partial is summed in plain FP32 words, with no compensated sums; the opt-in
 ``dweight_sum="fp32_pair"`` sums a tile's accumulator copies as an FP32 (hi, lo) pair.  Its cross-rank reduction
@@ -62,9 +68,11 @@ Name map (the deterministic package -> this module): ``cake_causal_conv1d_det_kc
     y_local = cake_causal_conv1d_nondet_kcp(x_local, weight, ctx)  # overlapped backward
     q, k, v = cake_causal_conv1d_nondet_kcp_multi((xq, xk, xv), (wq, wk, wv), ctx)
 
-The backward beside a kernel of another stream: the overlapped backward needs no setting
-(its CTAs claim their tokens at run time); ``bwd_reserve_sms=K`` (SM100 / SM103; ``ValueError`` on SM107) runs the
-one-program backward after the halo exchange instead, ``K`` SMs short of its single wave::
+The backward beside a kernel of another stream: off the L1o keys the overlapped backward needs no setting (its CTAs
+claim their tokens at run time).  ``bwd_reserve_sms=K`` (SM100 / SM103; ``ValueError`` on SM107) runs the one-program
+backward after the halo exchange instead, ``K`` SMs short of its single wave, on a key too, so a kernel holding up to
+``K`` SMs leaves it in one wave.  ``dweight_sum="fp32_pair"`` (below) is never routed, so on a key it keeps the program
+whose CTAs claim their tokens at run time; on SM107 it is the only such setting::
 
     y_local = cake_causal_conv1d_nondet_kcp(x_local, weight, ctx, bwd_reserve_sms=1)
 

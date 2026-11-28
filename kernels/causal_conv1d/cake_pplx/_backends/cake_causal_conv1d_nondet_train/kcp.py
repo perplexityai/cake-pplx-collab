@@ -45,7 +45,8 @@ exchange (:func:`_bwd_overlap`):
    Launch Control, the lanes of CTAs that have not started, so a kernel resident
    on another stream leaves no work waiting for the SMs it holds; their FP32
    ``dweight`` runs are added into four FP32 accumulator copies in the order the
-   runs end, summed once per channel tile;
+   runs end, summed once per channel tile (on the keys of the L1o route table the
+   main program is the one-program backward instead, below);
 3. after the wait, when the rank receives tail rows, the tail-row program
    (kind ``kcp_bwd_halo``) writes ``dx`` of the last three rows of each
    fragment that has them, from the received rows.
@@ -56,11 +57,14 @@ writes the tail rows again after it.  With more than one rank the head
 program(s), the multi call's concatenation of the send rows, the exchange
 issue, the wait and the tail-row program(s) run on the device's high-priority
 side stream (:func:`_side_stream`), forked from the caller's stream, and the
-main program(s) launch on the caller's stream at once (they read no head row)
-with the context's ``tail_row_off`` as their ``skip_row_off``: they leave the
-last rows of every fragment with a tail row to the tail-row programs, so the
-two write disjoint rows and the tail-row programs run as soon as the exchange
-arrives, beside the main programs, instead of after them.  The caller's stream
+main program(s) launch on the caller's stream at once (they read no head row).
+Off the L1o keys they run with the context's ``tail_row_off`` as their
+``skip_row_off``: they leave the last rows of every fragment with a tail row to
+the tail-row programs, so the two write disjoint rows and the tail-row programs
+run as soon as the exchange arrives, beside the main programs, instead of after
+them.  On a key the main program (the one-program backward) writes every row and
+the side stream waits for the caller's stream before the tail-row programs,
+which then write the tail rows again after it.  The caller's stream
 joins the side stream after the main programs (also when a launch raises).
 The buffers the side stream fills are allocated on the caller's stream before
 the fork, so the join orders their reuse (no ``record_stream``).  After the
@@ -85,7 +89,10 @@ sizes, channels and tokens on the rank; never ``dweight_sum="fp32_pair"``) the
 overlapped backward launches that one-program backward in place of
 ``kcp_bwd_dyn``, before the wait, with every ``tail_row_off`` entry ``-1`` and
 :data:`kcp_jit.L1O_RESERVE_SMS` SMs left free; its tail-row program then waits
-for it as well as for the exchange.  Both programs' workspaces are the package's cached backward workspace of the device
+for it as well as for the exchange.  Its grid is one wave with a static share
+of tokens per CTA, so beside a kernel on another stream that holds more than
+those SMs the CTAs that do not fit wait for a free SM (a second wave; no grid
+barrier, so no deadlock).  Both programs' workspaces are the package's cached backward workspace of the device
 and current stream (zero before and after every launch; inside a CUDA Graph
 capture with a nonzero capture id one zeroed buffer per capture and stream,
 shared by the capture's backward calls on that stream: a buffer an earlier
@@ -991,9 +998,10 @@ def _bwd_grid(
 def _overlapped(C: int, S: int, reserve: int) -> bool:
     """Whether a backward call runs the overlapped pair: ``kcp_bwd_dyn`` launched before the halo exchange's wait
     with every ``tail_row_off`` entry ``-1``, then ``kcp_bwd_halo`` (the rows the exchanged tail rows reach) after
-    it.  The shipped route of every call with tokens and at most ``DYN_MAX_CHANNELS`` channels; ``bwd_reserve_sms
-    >= 1`` keeps the ``kcp_bwd`` program's reserved grid, so it and a wider ``C`` run that program after the wait
-    (as does the ``bwd_route`` test knob ``"single"``)."""
+    it.  The shipped route of every call with tokens and at most ``DYN_MAX_CHANNELS`` channels (on a key of the L1o
+    route table, :func:`_dyn_host` gives the one-program backward's state in place of ``kcp_bwd_dyn``, launched at
+    the same point); ``bwd_reserve_sms >= 1`` keeps the ``kcp_bwd`` program's reserved grid, so it and a wider ``C``
+    run that program after the wait (as does the ``bwd_route`` test knob ``"single"``)."""
     return _TEST_KNOBS["bwd_route"] == "overlap" and not reserve and dyn_applies(C, S)
 
 
@@ -2674,7 +2682,9 @@ def _bwd_args(
 def _dyn_skip(e: dict[str, Any], side: Optional[torch.cuda.Stream]) -> torch.Tensor:
     """The main program's ``skip_row_off`` for a trimmed host-cache entry ``e``: the context's ``tail_row_off`` when
     the tail-row program runs on the side stream (``side``) beside it, so it leaves the rows that program writes;
-    else the all ``-1`` table (every row written, the tail-row program after it on the same stream)."""
+    else the all ``-1`` table (every row written, the tail-row program after it on the same stream).  The L1o route's
+    state (``"l1o"``) ignores the table: its one-program backward writes every row, and the tail-row program waits
+    for it."""
     if side is not None and e["dyn"]["halo"] is not None:
         return e["tail_row_off"]
     return e["dyn"]["no_tail"]
@@ -2700,8 +2710,10 @@ def _bwd_overlap(
     """The overlapped backward of a call with ``S > 0``: the main program while ``work`` (the exchange) is in flight.
     With ``side`` (the stream of the head program and the exchange issue) the main program leaves the tail-row
     program's rows (:func:`_dyn_skip`), and the side stream waits for the exchange and runs the tail-row program
-    beside it; the current stream then joins the side stream, also when a launch raises.  Without (``None``) the main
-    program writes every row, the current stream waits, then the tail-row program writes the tail rows again."""
+    beside it; on the L1o route (state ``"l1o"``) the one-program backward writes every row and the side stream also
+    waits for the current stream, so the tail-row program runs after it.  The current stream then joins the side
+    stream, also when a launch raises.  Without (``None``) the main program writes every row, the current stream
+    waits, then the tail-row program writes the tail rows again."""
     args = _bwd_args(e, x_flat, w, dy_flat, hist_t, dx_out, S=S, C=C)
     try:
         _launch_dyn(
@@ -3501,7 +3513,8 @@ def _kcp_backward_multi(
             dw.zero_()
         return dx_out, dw_out
     # The overlapped tensors' main programs run while the exchange is in flight; every other launch follows the wait,
-    # on the side stream when the call has one (the main programs then leave the tail-row programs' rows).
+    # on the side stream when the call has one (off the L1o keys the main programs then leave the tail-row programs'
+    # rows; an L1o one-program backward writes them, and the side stream waits for the caller's stream below).
     try:
         for (S, C, x_flat, w, dy_flat, hist_t, dx, dw, e), head in zip(
             calls, heads, strict=True
